@@ -2,6 +2,8 @@
 
 tinyFaaS is a lightweight FaaS (Function-as-a-Service) platform for edge environment with a focus on performance in constrained environments.
 
+This repo is a fork of tinyFaaS.
+
 ## Research
 
 To use tinyFaaS in the version used in our paper, use `git checkout v0.1`.
