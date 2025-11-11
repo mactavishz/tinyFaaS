@@ -24,9 +24,26 @@ test: build ${TEST_DIR}/test_all.py pkg/grpc/tinyfaas/tinyfaas_pb2.py pkg/grpc/t
 	@python3 ${TEST_DIR}/test_all.py
 
 .PHONY: clean
-clean: clean.sh
-	@sh clean.sh
-
+clean:
+	@echo "Cleaning build artifacts..."
+	rm -f tinyfaas-*
+	rm -f cmd/manager/rproxy-*.bin
+	rm -rf pkg/docker/runtimes-amd64
+	rm -rf pkg/docker/runtimes-arm
+	rm -rf pkg/docker/runtimes-arm64
+	@echo "Running additional clean-up script..."
+	./clean.sh
+	@echo "Clean complete"
+	
+.PHONY: debug
+debug:
+	@echo "PROJECT_NAME: $(PROJECT_NAME)"
+	@echo "PKG: $(PKG)"
+	@echo "GO_FILES: $(GO_FILES)"
+	@echo "SUPPORTED_ARCH: $(SUPPORTED_ARCH)"
+	@echo "RUNTIMES: $(RUNTIMES)"
+	@echo "OS: $(OS)"
+	@echo "ARCH: $(ARCH)"
 
 define arch_build
 pkg/docker/runtimes-$(arch): $(foreach runtime,$(RUNTIMES),pkg/docker/runtimes-$(arch)/$(runtime))
@@ -63,6 +80,8 @@ pkg/grpc/tinyfaas/tinyfaas.pb.go pkg/grpc/tinyfaas/tinyfaas_grpc.pb.go: pkg/grpc
 pkg/grpc/tinyfaas/tinyfaas_pb2.py pkg/grpc/tinyfaas/tinyfaas_pb2.pyi pkg/grpc/tinyfaas/tinyfaas_pb2_grpc.py: pkg/grpc/tinyfaas/tinyfaas.proto
 	@python3 -m grpc_tools.protoc -I $(<D) --python_out=$(<D) --grpc_python_out=$(<D) --mypy_out=$(<D) $<
 
+# rproxy is built FIRST as an intermediate artifact
+# this will be cleaned up automatically after the main build
 cmd/manager/rproxy-%.bin: pkg/grpc/tinyfaas/tinyfaas_pb2.py pkg/grpc/tinyfaas/tinyfaas_pb2.pyi pkg/grpc/tinyfaas/tinyfaas_pb2_grpc.py pkg/grpc/tinyfaas/tinyfaas.pb.go pkg/grpc/tinyfaas/tinyfaas_grpc.pb.go $(GO_FILES)
 	GOOS=$(word 1,$(subst -, ,$*)) GOARCH=$(word 2,$(subst -, ,$*)) go build -o $@ -v $(PKG)/cmd/rproxy
 
