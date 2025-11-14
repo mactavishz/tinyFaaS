@@ -12,6 +12,10 @@ ARCH=$(shell go env GOARCH)
 .PHONY: all
 all: build
 
+.PHONY: bin-name
+bin-name:
+	@echo "tinyfaas-$(OS)-$(ARCH)"
+
 .PHONY: build
 build: tinyfaas-${OS}-${ARCH}
 
