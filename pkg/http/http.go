@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"io"
 	"log"
 	"net/http"
@@ -8,7 +9,7 @@ import (
 	"github.com/OpenFogStack/tinyFaaS/pkg/rproxy"
 )
 
-func Start(r *rproxy.RProxy, listenAddr string) {
+func Start(ctx context.Context, r *rproxy.RProxy, listenAddr string) *http.Server {
 
 	mux := http.NewServeMux()
 
@@ -51,13 +52,27 @@ func Start(r *rproxy.RProxy, listenAddr string) {
 		}
 	})
 
-	log.Printf("Starting HTTP server on %s", listenAddr)
-	err := http.ListenAndServe(listenAddr, mux)
-
-	if err != nil {
-		log.Fatal(err)
+	server := &http.Server{
+		Addr:    listenAddr,
+		Handler: mux,
 	}
 
-	log.Print("HTTP server stopped")
+	go func() {
+		log.Println("HTTP server started", listenAddr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("HTTP server error: %v", err)
+		}
+		log.Print("HTTP server stopped")
+	}()
 
+	// handle graceful shutdown
+	go func() {
+		<-ctx.Done()
+		log.Println("shutting down HTTP server...")
+		if err := server.Shutdown(context.Background()); err != nil {
+			log.Printf("HTTP server shutdown error: %v", err)
+		}
+	}()
+
+	return server
 }

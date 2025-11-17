@@ -1,6 +1,7 @@
 package coap
 
 import (
+	"context"
 	"log"
 	"net"
 
@@ -10,7 +11,7 @@ import (
 
 const async = false
 
-func Start(r *rproxy.RProxy, listenAddr string) {
+func Start(ctx context.Context, r *rproxy.RProxy, listenAddr string) {
 
 	h := coap.FuncHandler(
 		func(l *net.UDPConn, a *net.UDPAddr, m *coap.Message) *coap.Message {
@@ -51,7 +52,16 @@ func Start(r *rproxy.RProxy, listenAddr string) {
 			return mes
 		})
 
-	log.Printf("Starting CoAP server on %s", listenAddr)
+	go func() {
+		log.Println("CoAP server started")
+		if err := coap.ListenAndServe("udp", listenAddr, h); err != nil {
+			log.Printf("CoAP server error: %v", err)
+		}
+		log.Print("CoAP server stopped")
+	}()
 
-	coap.ListenAndServe("udp", listenAddr, h)
+	// Note: CoAP (UDP) doesn't have built-in graceful shutdown
+	// The server will stop when the process exits
+	<-ctx.Done()
+	log.Println("CoAP server shutdown requested")
 }

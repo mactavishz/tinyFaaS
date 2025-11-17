@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/coap"
 	"github.com/OpenFogStack/tinyFaaS/pkg/grpc"
@@ -47,22 +51,26 @@ func main() {
 		return // nothing to do
 	}
 
+	// create context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	r := rproxy.New()
 
 	// CoAP
 	if listenAddr, ok := listenAddrs["coap"]; ok {
 		log.Printf("starting coap server on %s", listenAddr)
-		go coap.Start(r, listenAddr)
+		go coap.Start(ctx, r, listenAddr)
 	}
 	// HTTP
 	if listenAddr, ok := listenAddrs["http"]; ok {
 		log.Printf("starting http server on %s", listenAddr)
-		go tfhttp.Start(r, listenAddr)
+		tfhttp.Start(ctx, r, listenAddr)
 	}
 	// GRPC
 	if listenAddr, ok := listenAddrs["grpc"]; ok {
 		log.Printf("starting grpc server on %s", listenAddr)
-		go grpc.Start(r, listenAddr)
+		grpc.Start(ctx, r, listenAddr)
 	}
 
 	server := http.NewServeMux()
@@ -123,12 +131,39 @@ func main() {
 		}
 	})
 
-	log.Printf("listening on %s", rproxyListenAddress)
-	err := http.ListenAndServe(rproxyListenAddress, server)
-
-	if err != nil {
-		log.Printf("%s", err)
+	// create RProxy HTTP server with graceful shutdown support
+	rproxyServer := &http.Server{
+		Addr:    rproxyListenAddress,
+		Handler: server,
 	}
 
-	log.Printf("exiting")
+	// setup signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+
+	// start RProxy server in goroutine
+	go func() {
+		log.Println("rproxy server started")
+		if err := rproxyServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("rproxy server error: %s", err)
+		}
+	}()
+
+	// wait for shutdown signal
+	<-sigChan
+	log.Printf("received shutdown signal, initiating graceful shutdown...")
+
+	// cancel context to trigger protocol servers shutdown
+	cancel()
+
+	// create context with timeout for graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	// gracefully shutdown RProxy server
+	if err := rproxyServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("rproxy server shutdown error: %v", err)
+	}
+
+	log.Printf("shutdown complete, exiting")
 }

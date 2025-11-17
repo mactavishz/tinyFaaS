@@ -55,7 +55,7 @@ func (gs *GRPCServer) Request(ctx context.Context, d *tinyfaas.Data) (*tinyfaas.
 	}, nil
 }
 
-func Start(r *rproxy.RProxy, listenAddr string) {
+func Start(ctx context.Context, r *rproxy.RProxy, listenAddr string) *grpc.Server {
 	gs := grpc.NewServer()
 
 	tinyfaas.RegisterTinyFaaSServer(gs, &GRPCServer{
@@ -68,7 +68,20 @@ func Start(r *rproxy.RProxy, listenAddr string) {
 		log.Fatal("Failed to listen")
 	}
 
-	log.Printf("Starting GRPC server on %s", listenAddr)
-	defer gs.GracefulStop()
-	gs.Serve(lis)
+	go func() {
+		log.Println("GRPC server started")
+		if err := gs.Serve(lis); err != nil {
+			log.Printf("GRPC server error: %v", err)
+		}
+		log.Print("GRPC server stopped")
+	}()
+
+	// handle graceful shutdown
+	go func() {
+		<-ctx.Done()
+		log.Println("shutting down GRPC server...")
+		gs.GracefulStop()
+	}()
+
+	return gs
 }

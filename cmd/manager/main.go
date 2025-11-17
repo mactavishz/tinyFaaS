@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/docker"
 	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
@@ -152,7 +155,7 @@ func main() {
 
 	rproxy := c.Process
 
-	log.Println("started rproxy")
+	log.Printf("starting rproxy on port :%d", RProxyConfigPort)
 
 	s := &server{
 		ms: ms,
@@ -167,40 +170,76 @@ func main() {
 	r.HandleFunc("/logs", s.logsHandler)
 	r.HandleFunc("/uploadURL", s.urlUploadHandler)
 
+	// create HTTP server with graceful shutdown support
+	addr := fmt.Sprintf(":%d", ConfigPort)
+	httpServer := &http.Server{
+		Addr:    addr,
+		Handler: r,
+	}
+
+	// setup signal handling for graceful shutdown
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+
+	// start HTTP server in goroutine
 	go func() {
-		<-sig
-
-		log.Println("received interrupt")
-		log.Println("shutting down")
-
-		// stop rproxy
-		log.Println("stopping rproxy")
-		err := rproxy.Kill()
-
-		if err != nil {
-			log.Println(err)
+		log.Println("starting HTTP server on", addr)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
 		}
-
-		// stop handlers
-		log.Println("stopping management service")
-		err = ms.Stop()
-
-		if err != nil {
-			log.Println(err)
-		}
-
-		os.Exit(0)
 	}()
 
-	// start server
-	log.Println("starting HTTP server")
-	addr := fmt.Sprintf(":%d", ConfigPort)
-	err = http.ListenAndServe(addr, r)
-	if err != nil {
-		log.Fatal(err)
+	// wait for shutdown signal
+	<-sig
+
+	log.Println("received interrupt signal")
+	log.Println("initiating graceful shutdown...")
+
+	// create context with timeout for graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
+	// gracefully shutdown HTTP server
+	log.Println("shutting down HTTP server...")
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
 	}
+
+	// stop rproxy gracefully with SIGTERM first, then force kill if needed
+	log.Println("stopping rproxy...")
+	if err := rproxy.Signal(syscall.SIGTERM); err != nil {
+		log.Printf("failed to send SIGTERM to rproxy: %v", err)
+	}
+
+	// wait for rproxy to exit gracefully, with timeout
+	waitDone := make(chan error, 1)
+	go func() {
+		_, err := rproxy.Wait()
+		waitDone <- err
+	}()
+
+	select {
+	case <-time.After(10 * time.Second):
+		log.Println("rproxy did not exit gracefully, forcing kill...")
+		if err := rproxy.Kill(); err != nil {
+			log.Printf("failed to kill rproxy: %v", err)
+		}
+	case err := <-waitDone:
+		if err != nil {
+			log.Printf("rproxy exited with error: %v", err)
+		} else {
+			log.Println("rproxy stopped gracefully")
+		}
+	}
+
+	// stop management service
+	log.Println("stopping management service...")
+	if err := ms.Stop(); err != nil {
+		log.Printf("management service shutdown error: %v", err)
+	}
+
+	log.Println("shutdown complete")
+	os.Exit(0)
 }
 
 func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
