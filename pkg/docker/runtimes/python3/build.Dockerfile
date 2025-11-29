@@ -6,4 +6,4 @@ FROM python:${PYTHON_VERSION}-alpine${ALPINE_VERSION}
 # Create app directory
 WORKDIR /usr/src/app
 
-COPY functionhandler.py .
+COPY main.py .
