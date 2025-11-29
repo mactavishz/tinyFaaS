@@ -27,8 +27,8 @@ import (
 )
 
 const (
-	TmpDir           = "./tmp"
-	containerTimeout = 1
+	TmpDir                = "./tmp"
+	DEFAULT_PUBLIC_DOMAIN = "tinyfaas.com"
 )
 
 type dockerHandler struct {
@@ -67,7 +67,7 @@ func New(tinyFaaSID string) *DockerBackend {
 	// Get public domain from environment variable
 	db.publicDomain = os.Getenv("TINYFAAS_PUBLIC_DOMAIN")
 	if db.publicDomain == "" {
-		db.publicDomain = "tinyfaas.com"
+		db.publicDomain = DEFAULT_PUBLIC_DOMAIN
 		log.Printf("TINYFAAS_PUBLIC_DOMAIN not set, using default: %s", db.publicDomain)
 	}
 
