@@ -1,18 +1,14 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path"
 	"strconv"
 	"strings"
 	"syscall"
@@ -24,10 +20,21 @@ import (
 )
 
 const (
-	ConfigPort          = 8080
-	RProxyConfigPort    = 8081
-	RProxyListenAddress = ""
+	ConfigPort       = 8080
+	RProxyConfigPort = 8081
 )
+
+var (
+	// RProxyListenAddress can be overridden via RPROXY_LISTEN_ADDRESS env var
+	RProxyListenAddress = getEnvOrDefault("RPROXY_LISTEN_ADDRESS", "127.0.0.1")
+)
+
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
 
 type server struct {
 	ms *manager.ManagementService
@@ -39,9 +46,7 @@ func main() {
 	log.SetPrefix("manager: ")
 
 	ports := map[string]int{
-		"coap": 5683,
 		"http": 8000,
-		"grpc": 9000,
 	}
 
 	for p := range ports {
@@ -97,65 +102,7 @@ func main() {
 		tfBackend,
 	)
 
-	rproxyArgs := []string{fmt.Sprintf("%s:%d", RProxyListenAddress, RProxyConfigPort)}
-
-	for prot, port := range ports {
-		rproxyArgs = append(rproxyArgs, fmt.Sprintf("%s:%s:%d", prot, RProxyListenAddress, port))
-	}
-
-	log.Println("rproxy args:", rproxyArgs)
-
-	// unpack the rproxy binary in a temporary directory
-	rProxyDir := path.Join(os.TempDir(), id)
-
-	err := os.MkdirAll(rProxyDir, 0755)
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	err = os.WriteFile(path.Join(rProxyDir, "rproxy.bin"), RProxyBin, 0755)
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	defer os.RemoveAll(rProxyDir)
-
-	c := exec.Command(path.Join(rProxyDir, "rproxy.bin"), rproxyArgs...)
-
-	stdout, err := c.StdoutPipe()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	stderr, err := c.StderrPipe()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			fmt.Println(scanner.Text())
-		}
-	}()
-
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			fmt.Println(scanner.Text())
-		}
-	}()
-
-	err = c.Start()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	rproxy := c.Process
-
-	log.Printf("starting rproxy on port :%d", RProxyConfigPort)
+	log.Printf("manager expects rproxy at %s:%d", RProxyListenAddress, RProxyConfigPort)
 
 	s := &server{
 		ms: ms,
@@ -205,34 +152,7 @@ func main() {
 		log.Printf("HTTP server shutdown error: %v", err)
 	}
 
-	// stop rproxy gracefully with SIGTERM first, then force kill if needed
-	log.Println("stopping rproxy...")
-	if err := rproxy.Signal(syscall.SIGTERM); err != nil {
-		log.Printf("failed to send SIGTERM to rproxy: %v", err)
-	}
-
-	// wait for rproxy to exit gracefully, with timeout
-	waitDone := make(chan error, 1)
-	go func() {
-		_, err := rproxy.Wait()
-		waitDone <- err
-	}()
-
-	select {
-	case <-time.After(10 * time.Second):
-		log.Println("rproxy did not exit gracefully, forcing kill...")
-		if err := rproxy.Kill(); err != nil {
-			log.Printf("failed to kill rproxy: %v", err)
-		}
-	case err := <-waitDone:
-		if err != nil {
-			log.Printf("rproxy exited with error: %v", err)
-		} else {
-			log.Println("rproxy stopped gracefully")
-		}
-	}
-
-	// stop management service
+	// stop management service (cleans up function containers)
 	log.Println("stopping management service...")
 	if err := ms.Stop(); err != nil {
 		log.Printf("management service shutdown error: %v", err)

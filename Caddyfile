@@ -1,0 +1,38 @@
+# Caddyfile for tinyFaaS Gateway
+#
+# This configuration sets up Caddy as a reverse proxy for tinyFaaS.
+# - /fn/* routes to the rproxy for function invocation
+# - /system/* routes to the manager for function management
+#
+# For development (HTTP only), use this file as-is.
+# For production with HTTPS, replace ":80" with your domain name (e.g., "tinyfaas.com")
+# and Caddy will automatically provision TLS certificates.
+
+:80 {
+	# Function invocation endpoint
+	# Example: curl http://localhost/fn/myfunction
+	handle_path /fn/* {
+		reverse_proxy localhost:8000 {
+			# Pass the original source IP to rproxy for call graph tracking
+			header_up X-FaaS-Source-IP {remote_host}
+		}
+	}
+
+	# Function management endpoint
+	# Example: curl -X POST http://localhost/system/upload -d '...'
+	handle_path /system/* {
+		reverse_proxy localhost:8080 {
+			header_up X-FaaS-Source-IP {remote_host}
+		}
+	}
+
+	# Health check
+	handle /health {
+		respond "OK" 200
+	}
+
+	# Default response for root
+	handle / {
+		respond "tinyFaaS Gateway" 200
+	}
+}

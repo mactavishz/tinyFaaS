@@ -1,35 +1,10 @@
 # tinyFaaS: A Lightweight FaaS Platform for Edge Environments
 
-tinyFaaS is a lightweight FaaS (Function-as-a-Service) platform for edge environment with a focus on performance in constrained environments.
-
 This repo is a fork of tinyFaaS.
 
-## Research
+tinyFaaS is a lightweight FaaS (Function-as-a-Service) platform for edge environment with a focus on performance in constrained environments.
 
-To use tinyFaaS in the version used in our paper, use `git checkout v0.1`.
-If you use this software in a publication, please cite it as:
-
-### Text
-
-T. Pfandzelter and D. Bermbach, **tinyFaaS: A Lightweight FaaS Platform for Edge Environments**, Proceedings of the 2020 IEEE International Conference on Fog Computing (ICFC '20), Sydney, Australia, 2020, pp. 17-24, DOI: 10.1109/ICFC49376.2020.00011.
-
-### BibTeX
-
-```bibtex
-@inproceedings{pfandzelter_tinyfaas:_2020,
-    author = "Pfandzelter, Tobias and Bermbach, David",
-    title = "tinyFaaS: A Lightweight FaaS Platform for Edge Environments",
-    booktitle = "Proceedings of the 2020 IEEE International Conference on Fog Computing (ICFC '20)",
-    year = 2020,
-    publisher = "IEEE",
-    pages = "17--24",
-    doi = "10.1109/ICFC49376.2020.00011"
-}
-```
-
-For a full list of publications, please see [our website](https://www.tu.berlin/en/mcc/research/publications).
-
-### License
+## License
 
 The code in this repository is licensed under the terms of the [MIT](./LICENSE) license.
 
@@ -115,19 +90,11 @@ Output responses should be provided on `stdout`.
 
 ### Calling Functions
 
-tinyFaaS supports different application layer protocols at its reverse proxy.
-Different protocols are useful for different use-cases: CoAP for lightweight communication, e.g., for IoT devices; HTTP to support traditional web applications; GRPC for inter-process communication.
-
-#### CoAP
-
-To call a tinyFaaS function using its CoAP endpoint, make a GET or POST request to `coap://{HOST}:{PORT}/{NAME}` where `{HOST}` is the address of the tinyFaaS host, `{PORT}` is the port for the tinyFaaS CoAP endpoint (default is `5683`), and `{NAME}` is the name of your function.
-You may include data in any form you want, it will be passed to your function.
-
-Unfortunately, [`curl` does not yet support CoAP](https://curl.se/mail/lib-2018-05/0017.html), but [a number](https://github.com/coapjs/coap-cli) [of other](https://aiocoap.readthedocs.io/en/latest/tools.html) [tools are available](https://fitbit.github.io/golden-gate/tools/coap_client.html).
+tinyFaaS supports only HTTP function invocations at the moment.
 
 #### HTTP
 
-To call a tinyFaaS function using its HTTP endpoint, make a GET or POST request to `http://{HOST}:{PORT}/{NAME}` where `{HOST}` is the address of the tinyFaaS host, `{PORT}` is the port for the tinyFaaS HTTP endpoint (default is `80`), and `{NAME}` is the name of your function.
+To call a tinyFaaS function using its HTTP endpoint, make a GET or POST request to `http://{HOST}:{PORT}/{NAME}` where `{HOST}` is the address of the tinyFaaS host, `{PORT}` is the port for the tinyFaaS HTTP endpoint (default is `8000`), and `{NAME}` is the name of your function.
 You may include data in any form you want, it will be passed to your function.
 
 TLS is not supported (but contributions are welcome).
@@ -138,12 +105,6 @@ An asynchronous request means the client will receive a `202` response code imme
 ```sh
 curl --header "X-tinyFaaS-Async: true" "http://localhost:8000/sieve"
 ```
-
-#### gRPC
-
-To use the gRPC endpoint, compile the `tinyfaas` protocol buffer (included in [`./pkg/grpc/tinyfaas`](./pkg/grpc/tinyfaas)) for your programming language and import it into your application.
-We already provide compiled versions for Go and Python in that directory.
-Specify the tinyFaaS host and port (default is `9000`) for the GRPC endpoint and use the `Request` function with the `functionIdentifier` being your function's name and the `data` field including data in any form you want.
 
 ### Removing tinyFaaS
 
@@ -170,19 +131,12 @@ By default, tinyFaaS will use the following ports:
 | Port | Protocol | Description        |
 | ---- | -------- | ------------------ |
 | 8080 | TCP      | Management Service |
-| 5683 | UDP      | CoAP Endpoint      |
+| 8081 | TCP      | Reverse Proxy      |
 | 8000 | TCP      | HTTP Endpoint      |
-| 9000 | TCP      | GRPC Endpoint      |
 
 To change the port of the management service, change the port binding in the `docker run` command.
 
-To change or deactivate the endpoints of tinyFaaS, you can use the `COAP_PORT`, `HTTP_PORT`, and `GRPC_PORT` environment variables, which must be passed to the management service Docker container.
-Specify `-1` to deactivate a specific endpoint.
-For example, to use `6000` as the port for the CoAP and deactivate GRPC, run the management service with this command:
-
-```bash
-docker run --env COAP_PORT=6000 --env GRPC_PORT=-1 -v /var/run/docker.sock:/var/run/docker.sock -p 8080:8080 --name tinyfaas-mgmt -d tinyfaas-mgmt tinyfaas-mgmt
-```
+To change or deactivate the endpoints of tinyFaaS, you can use the `HTTP_PORT` environment variables, which must be passed to the management service Docker container.
 
 ### Tests
 

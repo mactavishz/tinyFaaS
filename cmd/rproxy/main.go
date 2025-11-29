@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -13,8 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/OpenFogStack/tinyFaaS/pkg/coap"
-	"github.com/OpenFogStack/tinyFaaS/pkg/grpc"
 	tfhttp "github.com/OpenFogStack/tinyFaaS/pkg/http"
 	"github.com/OpenFogStack/tinyFaaS/pkg/rproxy"
 )
@@ -23,8 +20,9 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.SetPrefix("rproxy: ")
 
-	if len(os.Args) <= 3 {
-		fmt.Println("Usage: ./rproxy <listen-addr> [<protocol>:<listen-addr>]")
+	if len(os.Args) < 3 {
+		log.Printf("invalid number of arguments")
+		log.Printf("usage: ./rproxy <listen-addr> [<protocol>:<listen-addr>]")
 		os.Exit(1)
 	}
 
@@ -36,7 +34,8 @@ func main() {
 		prot, listenAddr, ok := strings.Cut(arg, ":")
 
 		if !ok {
-			fmt.Println("Usage: ./rproxy <listen-addr> <protocol>:<listen-addr>")
+			log.Println("invalid argument:", arg)
+			log.Println("usage: ./rproxy <listen-addr> <protocol>:<listen-addr>")
 			os.Exit(1)
 		}
 
@@ -57,24 +56,15 @@ func main() {
 
 	r := rproxy.New()
 
-	// CoAP
-	if listenAddr, ok := listenAddrs["coap"]; ok {
-		log.Printf("starting coap server on %s", listenAddr)
-		go coap.Start(ctx, r, listenAddr)
-	}
 	// HTTP
 	if listenAddr, ok := listenAddrs["http"]; ok {
 		log.Printf("starting http server on %s", listenAddr)
 		tfhttp.Start(ctx, r, listenAddr)
 	}
-	// GRPC
-	if listenAddr, ok := listenAddrs["grpc"]; ok {
-		log.Printf("starting grpc server on %s", listenAddr)
-		grpc.Start(ctx, r, listenAddr)
-	}
 
 	server := http.NewServeMux()
 
+	// Handle function registration/deletion
 	server.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != "POST" {
 			w.WriteHeader(http.StatusMethodNotAllowed)

@@ -1,0 +1,31 @@
+[Unit]
+Description=tinyFaaS Manager Service
+Documentation=https://github.com/OpenFogStack/tinyFaaS
+After=network.target docker.service tf-rproxy.service
+Requires=docker.service tf-rproxy.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p /var/lib/tinyfaas/tmp
+ExecStart=/usr/local/bin/tf-manager
+Restart=on-failure
+RestartSec=5
+
+# Environment variables (can be overridden in /etc/default/tf-manager)
+EnvironmentFile=-/etc/default/tf-manager
+
+# Default environment
+Environment=RPROXY_LISTEN_ADDRESS=127.0.0.1
+Environment=TF_BACKEND=docker
+Environment=TF_TMP_DIR=/var/lib/tinyfaas/tmp
+
+# Working directory
+WorkingDirectory=/var/lib/tinyfaas
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tf-manager
+
+[Install]
+WantedBy=multi-user.target

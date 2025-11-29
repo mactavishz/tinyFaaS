@@ -32,20 +32,23 @@ const (
 )
 
 type dockerHandler struct {
-	name       string
-	env        string
-	threads    int
-	uniqueName string
-	filePath   string
-	client     *client.Client
-	network    string
-	containers []string
-	handlerIPs []string
+	name        string
+	env         string
+	threads     int
+	uniqueName  string
+	filePath    string
+	client      *client.Client
+	network     string // per-function network ID
+	networkName string // per-function network name
+	containers  []string
+	handlerIPs  []string
 }
 
 type DockerBackend struct {
-	client     *client.Client
-	tinyFaaSID string
+	client       *client.Client
+	tinyFaaSID   string
+	gatewayIP    string // host gateway IP for --add-host (where Caddy runs)
+	publicDomain string // public domain for --add-host (e.g., tinyfaas.com)
 }
 
 func New(tinyFaaSID string) *DockerBackend {
@@ -56,10 +59,29 @@ func New(tinyFaaSID string) *DockerBackend {
 		return nil
 	}
 
-	return &DockerBackend{
+	db := &DockerBackend{
 		client:     client,
 		tinyFaaSID: tinyFaaSID,
 	}
+
+	// Get public domain from environment variable
+	db.publicDomain = os.Getenv("TINYFAAS_PUBLIC_DOMAIN")
+	if db.publicDomain == "" {
+		db.publicDomain = "tinyfaas.com"
+		log.Printf("TINYFAAS_PUBLIC_DOMAIN not set, using default: %s", db.publicDomain)
+	}
+
+	// Get gateway IP from environment variable
+	// This should be the host IP where Caddy is running
+	db.gatewayIP = os.Getenv("TINYFAAS_GATEWAY_IP")
+	if db.gatewayIP == "" {
+		// Default to host.docker.internal for Docker Desktop
+		// On Linux, this might need to be set explicitly to the host IP
+		db.gatewayIP = "host-gateway"
+		log.Printf("TINYFAAS_GATEWAY_IP not set, using default: %s", db.gatewayIP)
+	}
+
+	return db
 }
 
 func (db *DockerBackend) Stop() error {
@@ -150,12 +172,16 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 
 	log.Println("built image", dh.uniqueName)
 
-	// create network
-	// docker network create <network>
-	network, err := db.client.NetworkCreate(
+	// Create per-function isolated network
+	// Each function gets its own network, so functions cannot directly communicate with each other
+	// They can only reach the host (where Caddy runs) via the gateway
+	networkResp, err := db.client.NetworkCreate(
 		context.Background(),
 		dh.uniqueName,
 		network.CreateOptions{
+			Driver: "bridge",
+			// Enable isolation - containers can only access the gateway, not other networks
+			Internal: false, // Must be false to allow internet/host access
 			Labels: map[string]string{
 				"tinyfaas-function": dh.name,
 				"tinyFaaS":          db.tinyFaaSID,
@@ -166,9 +192,9 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 		return nil, err
 	}
 
-	dh.network = network.ID
-
-	log.Println("created network", dh.uniqueName, "with id", network.ID)
+	dh.network = networkResp.ID
+	dh.networkName = dh.uniqueName
+	log.Println("created isolated network", dh.uniqueName, "with id", networkResp.ID)
 
 	e := make([]string, 0, len(envs))
 
@@ -176,10 +202,19 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 		e = append(e, fmt.Sprintf("%s=%s", k, v))
 	}
 
+	// Build extra hosts for --add-host
+	// This maps the public domain to the host gateway (where Caddy is running)
+	// Using "host-gateway" is a special Docker value that resolves to the host's IP
+	extraHosts := []string{}
+	if db.publicDomain != "" && db.gatewayIP != "" {
+		extraHosts = append(extraHosts, fmt.Sprintf("%s:%s", db.publicDomain, db.gatewayIP))
+		log.Printf("adding extra host: %s -> %s", db.publicDomain, db.gatewayIP)
+	}
+
 	// create containers
 	// docker run -d --network <network> --name <container> <image>
 	for i := 0; i < dh.threads; i++ {
-		container, err := db.client.ContainerCreate(
+		containerResp, err := db.client.ContainerCreate(
 			context.Background(),
 			&container.Config{
 				Image: dh.uniqueName,
@@ -190,7 +225,8 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 				Env: e,
 			},
 			&container.HostConfig{
-				NetworkMode: container.NetworkMode(dh.uniqueName),
+				NetworkMode: container.NetworkMode(dh.networkName),
+				ExtraHosts:  extraHosts,
 			},
 			nil,
 			nil,
@@ -201,9 +237,9 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 			return nil, err
 		}
 
-		log.Println("created container", container.ID)
+		log.Println("created container", containerResp.ID)
 
-		dh.containers = append(dh.containers, container.ID)
+		dh.containers = append(dh.containers, containerResp.ID)
 	}
 
 	// remove folder
@@ -251,18 +287,20 @@ func (dh *dockerHandler) Start() error {
 
 	// get container IPs
 	// docker inspect <container>
-	for _, container := range dh.containers {
+	for _, containerID := range dh.containers {
 		c, err := dh.client.ContainerInspect(
 			context.Background(),
-			container,
+			containerID,
 		)
 		if err != nil {
 			return err
 		}
 
-		dh.handlerIPs = append(dh.handlerIPs, c.NetworkSettings.Networks[dh.uniqueName].IPAddress)
+		// Use the network name to get the IP
+		ip := c.NetworkSettings.Networks[dh.networkName].IPAddress
+		dh.handlerIPs = append(dh.handlerIPs, ip)
 
-		log.Println("got ip", c.NetworkSettings.Networks[dh.uniqueName].IPAddress, "for container", container)
+		log.Println("got ip", ip, "for container", containerID)
 	}
 
 	// wait for the containers to be ready
@@ -358,17 +396,16 @@ func (dh *dockerHandler) Destroy() error {
 	}
 	wg.Wait()
 
-	// remove network
-	// docker network rm <network>
+	// Remove the per-function network
 	err := dh.client.NetworkRemove(
 		context.Background(),
 		dh.network,
 	)
 	if err != nil {
-		return err
+		log.Printf("error removing network %s: %s", dh.network, err)
+	} else {
+		log.Println("removed network", dh.network)
 	}
-
-	log.Println("removed network", dh.network)
 
 	// remove image
 	// docker rmi <image>

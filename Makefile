@@ -9,36 +9,80 @@ RUNTIMES := $(shell find pkg/docker/runtimes -name Dockerfile | xargs -n1 dirnam
 OS=$(shell go env GOOS)
 ARCH=$(shell go env GOARCH)
 
+# Installation paths
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+SYSTEMD_DIR ?= /etc/systemd/system
+
 .PHONY: all
 all: build
 
 .PHONY: bin-name
 bin-name:
-	@echo "tinyfaas-$(OS)-$(ARCH)"
+	@echo "tf-manager-$(OS)-$(ARCH) tf-rproxy-$(OS)-$(ARCH)"
 
 .PHONY: build
-build: tinyfaas-${OS}-${ARCH}
+build: tf-manager-${OS}-${ARCH} tf-rproxy-${OS}-${ARCH}
+
+.PHONY: build-manager
+build-manager: tf-manager-${OS}-${ARCH}
+
+.PHONY: build-rproxy
+build-rproxy: tf-rproxy-${OS}-${ARCH}
 
 .PHONY: start
-start: tinyfaas-${OS}-${ARCH}
-	./$<
+start: build
+	@echo "Starting tinyFaaS services..."
+	@echo "Start rproxy first, then manager:"
+	@echo "  ./tf-rproxy-$(OS)-$(ARCH) 127.0.0.1:8081 http:127.0.0.1:8000"
+	@echo "  ./tf-manager-$(OS)-$(ARCH)"
 
 .PHONY: test
-test: build ${TEST_DIR}/test_all.py pkg/grpc/tinyfaas/tinyfaas_pb2.py pkg/grpc/tinyfaas/tinyfaas_pb2.pyi pkg/grpc/tinyfaas/tinyfaas_pb2_grpc.py
+test: build ${TEST_DIR}/test_all.py
 	@python3 ${TEST_DIR}/test_all.py
 
 .PHONY: clean
 clean:
 	@echo "Cleaning build artifacts..."
+	rm -f tf-manager-*
+	rm -f tf-rproxy-*
 	rm -f tinyfaas-*
-	rm -f cmd/manager/rproxy-*.bin
 	rm -rf pkg/docker/runtimes-amd64
 	rm -rf pkg/docker/runtimes-arm
 	rm -rf pkg/docker/runtimes-arm64
 	@echo "Running additional clean-up script..."
 	./clean.sh
 	@echo "Clean complete"
-	
+
+.PHONY: install
+install: build
+	@echo "Installing binaries to $(BINDIR)..."
+	install -d $(BINDIR)
+	install -m 755 tf-manager-$(OS)-$(ARCH) $(BINDIR)/tf-manager
+	install -m 755 tf-rproxy-$(OS)-$(ARCH) $(BINDIR)/tf-rproxy
+	@echo "Creating working directory..."
+	install -d /var/lib/tinyfaas
+	@echo "Installing systemd service files to $(SYSTEMD_DIR)..."
+	install -d $(SYSTEMD_DIR)
+	install -m 644 systemd/tf-rproxy.service $(SYSTEMD_DIR)/
+	install -m 644 systemd/tf-manager.service $(SYSTEMD_DIR)/
+	@echo ""
+	@echo "Installation complete. To enable and start the services:"
+	@echo "  sudo systemctl daemon-reload"
+	@echo "  sudo systemctl enable tf-rproxy tf-manager"
+	@echo "  sudo systemctl start tf-rproxy tf-manager"
+
+.PHONY: uninstall
+uninstall:
+	@echo "Stopping services..."
+	-systemctl stop tf-manager tf-rproxy 2>/dev/null || true
+	-systemctl disable tf-manager tf-rproxy 2>/dev/null || true
+	@echo "Removing binaries and service files..."
+	rm -f $(BINDIR)/tf-manager $(BINDIR)/tf-rproxy
+	rm -f $(SYSTEMD_DIR)/tf-manager.service $(SYSTEMD_DIR)/tf-rproxy.service
+	systemctl daemon-reload
+	@echo "Uninstall complete"
+
 .PHONY: debug
 debug:
 	@echo "PROJECT_NAME: $(PROJECT_NAME)"
@@ -71,26 +115,16 @@ pkg/docker/runtimes-$(arch)/$(runtime)/Dockerfile: pkg/docker/runtimes/$(runtime
 endef
 $(foreach arch,$(SUPPORTED_ARCH),$(foreach runtime,$(RUNTIMES),$(eval $(runtime_build))))
 
-# requires protoc,  protoc-gen-go and protoc-gen-go-grpc
-# install from your package manager, e.g.:
-# 	brew install protobuf
-# 	brew install protoc-gen-go
-#	brew install protoc-gen-go-grpc
-pkg/grpc/tinyfaas/tinyfaas.pb.go pkg/grpc/tinyfaas/tinyfaas_grpc.pb.go: pkg/grpc/tinyfaas/tinyfaas.proto
-	@protoc -I $(<D) $< --go_out=$(<D) --go_opt=paths=source_relative --go-grpc_out=$(<D) --go-grpc_opt=require_unimplemented_servers=false,paths=source_relative
-
-# requires grpcio-tools and mypy-protobuf
-# 	python3 -m pip install -r requirements.txt
-pkg/grpc/tinyfaas/tinyfaas_pb2.py pkg/grpc/tinyfaas/tinyfaas_pb2.pyi pkg/grpc/tinyfaas/tinyfaas_pb2_grpc.py: pkg/grpc/tinyfaas/tinyfaas.proto
-	@python3 -m grpc_tools.protoc -I $(<D) --python_out=$(<D) --grpc_python_out=$(<D) --mypy_out=$(<D) $<
-
-# rproxy is built FIRST as an intermediate artifact
-# this will be cleaned up automatically after the main build
-cmd/manager/rproxy-%.bin: pkg/grpc/tinyfaas/tinyfaas_pb2.py pkg/grpc/tinyfaas/tinyfaas_pb2.pyi pkg/grpc/tinyfaas/tinyfaas_pb2_grpc.py pkg/grpc/tinyfaas/tinyfaas.pb.go pkg/grpc/tinyfaas/tinyfaas_grpc.pb.go $(GO_FILES)
-	GOOS=$(word 1,$(subst -, ,$*)) GOARCH=$(word 2,$(subst -, ,$*)) go build -o $@ -v $(PKG)/cmd/rproxy
-
-tinyfaas-darwin-%: cmd/manager/rproxy-darwin-%.bin pkg/docker/runtimes-% $(GO_FILES)
+# Build manager binary (requires runtimes for docker backend)
+tf-manager-darwin-%: pkg/docker/runtimes-% $(GO_FILES)
 	GOOS=darwin GOARCH=$* go build -o $@ -v $(PKG)/cmd/manager
 
-tinyfaas-linux-%: cmd/manager/rproxy-linux-%.bin pkg/docker/runtimes-% $(GO_FILES)
+tf-manager-linux-%: pkg/docker/runtimes-% $(GO_FILES)
 	GOOS=linux GOARCH=$* go build -o $@ -v $(PKG)/cmd/manager
+
+# Build rproxy binary (standalone, no runtime dependencies)
+tf-rproxy-darwin-%: $(GO_FILES)
+	GOOS=darwin GOARCH=$* go build -o $@ -v $(PKG)/cmd/rproxy
+
+tf-rproxy-linux-%: $(GO_FILES)
+	GOOS=linux GOARCH=$* go build -o $@ -v $(PKG)/cmd/rproxy

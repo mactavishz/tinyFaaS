@@ -1,4 +1,6 @@
 tinyfaas-*
+tf-*
+!systemd/tf-*
 cmd/manager/rproxy-*.bin
 tmp/
 pkg/docker/runtimes-*/
