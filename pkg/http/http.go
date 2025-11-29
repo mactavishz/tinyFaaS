@@ -7,7 +7,10 @@ import (
 	"net/http"
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/rproxy"
+	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 )
+
+const SOURCE_IP_HEADER = "X-FaaS-Source-IP"
 
 func Start(ctx context.Context, r *rproxy.RProxy, listenAddr string) *http.Server {
 
@@ -22,6 +25,15 @@ func Start(ctx context.Context, r *rproxy.RProxy, listenAddr string) *http.Serve
 
 		async := req.Header.Get("X-tinyFaaS-Async") != ""
 
+		// Determine the caller by checking the X-TinyFaaS-Source-IP header
+		// This header is set by Caddy to preserve the original source IP
+		sourceIP := req.Header.Get(SOURCE_IP_HEADER)
+		if sourceIP == "" {
+			// Fallback to RemoteAddr if header is not set
+			sourceIP = util.ExtractIP(req.RemoteAddr)
+		}
+
+		log.Printf("Request IP: %s", sourceIP)
 		log.Printf("have request for path: %s (async: %v)", p, async)
 
 		req_body, err := io.ReadAll(req.Body)

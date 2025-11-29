@@ -67,9 +67,9 @@ func New(id string, rproxyListenAddress string, rproxyPort map[string]int, rprox
 
 func (ms *ManagementService) createFunction(name string, env string, threads int, funczip []byte, subfolderPath string, envs map[string]string) (string, error) {
 
-	// only allow alphanumeric characters
-	if !util.IsAlphaNumeric(name) {
-		return "", fmt.Errorf("function name %s contains non-alphanumeric characters", name)
+	// validate function name according to RFC 1035 DNS label rules
+	if !util.IsValidFunctionName(name) {
+		return "", fmt.Errorf("function name %s is not valid (must be 1-63 lowercase alphanumeric characters or hyphens, cannot start or end with hyphen)", name)
 	}
 
 	// make a uuidv4 for the function
