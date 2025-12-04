@@ -1,5 +1,5 @@
 {
-  "name": "functionhandler",
+  "name": "function",
   "version": "1.0.0",
-  "main": "functionhandler.js"
+  "main": "index.js"
 }

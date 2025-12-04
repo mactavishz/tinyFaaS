@@ -1,18 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
+	"os/exec"
 )
 
 func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8000"
-	}
+	port := ":8000"
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -27,39 +25,32 @@ func main() {
 			return
 
 		case http.MethodPost:
-			body, err := io.ReadAll(r.Body)
+			data, err := io.ReadAll(r.Body)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				fmt.Fprint(w, err)
 				return
 			}
-
-			headers := make(map[string]string)
-			for k, v := range r.Header {
-				headers[k] = v[0]
-			}
-
-			result, err := fn(string(body), headers) // returns string, err
+			cmd := exec.Command("./handler.sh")
+			cmd.Stdin = bytes.NewReader(data)
+			output, err := cmd.CombinedOutput()
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				fmt.Fprint(w, err)
 				return
 			}
 			w.WriteHeader(http.StatusOK)
-			_, err = w.Write([]byte(result))
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				fmt.Fprint(w, err)
-			}
-
+			w.Write(output)
+			return
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 	})
 
-	log.Printf("Server starting on port %s\n", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+	log.Printf("Server listening on port %s\n", port)
+	err := http.ListenAndServe(port, nil)
+	if err != nil {
+		log.Fatal(err)
 	}
 }

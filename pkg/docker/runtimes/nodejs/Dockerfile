@@ -10,4 +10,4 @@ COPY fn fn
 
 RUN npm install ./fn
 
-CMD [ "node", "functionhandler.js" ]
+CMD [ "node", "index.js" ]

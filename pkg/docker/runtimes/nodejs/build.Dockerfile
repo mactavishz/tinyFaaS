@@ -7,9 +7,8 @@ FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
 # Create app directory
 WORKDIR /usr/src/app
 
-COPY functionhandler.js .
+COPY index.js .
 COPY package.json .
 
-RUN npm install express && \
-    npm install body-parser && \
+RUN npm install express@5 && \
     npm cache clean --force
