@@ -47,12 +47,18 @@ clean:
 	rm -f tf-manager-*
 	rm -f tf-rproxy-*
 	rm -f tinyfaas-*
+	@echo "Running additional clean-up script..."
+	./clean.sh
+	@echo "Clean complete (runtime blobs preserved)"
+	@echo "To also clean runtime blobs, run: make clean-runtimes"
+
+.PHONY: clean-runtimes
+clean-runtimes:
+	@echo "Cleaning runtime blobs..."
 	rm -rf pkg/docker/runtimes-amd64
 	rm -rf pkg/docker/runtimes-arm
 	rm -rf pkg/docker/runtimes-arm64
-	@echo "Running additional clean-up script..."
-	./clean.sh
-	@echo "Clean complete"
+	@echo "Runtime blobs cleaned"
 
 .PHONY: install
 install: build
@@ -99,10 +105,9 @@ endef
 $(foreach arch,$(SUPPORTED_ARCH),$(eval $(arch_build)))
 
 define runtime_build
-.PHONY: pkg/docker/runtimes-$(arch)/$(runtime)
 pkg/docker/runtimes-$(arch)/$(runtime): pkg/docker/runtimes-$(arch)/$(runtime)/Dockerfile pkg/docker/runtimes-$(arch)/$(runtime)/blob.tar.gz
 
-pkg/docker/runtimes-$(arch)/$(runtime)/blob.tar.gz: pkg/docker/runtimes/$(runtime)/build.Dockerfile
+pkg/docker/runtimes-$(arch)/$(runtime)/blob.tar.gz: pkg/docker/runtimes/$(runtime)/build.Dockerfile $$(wildcard pkg/docker/runtimes/$(runtime)/*)
 	mkdir -p $$(@D)
 	cd $$(<D) ; docker build --platform=linux/$(arch) -t tf-build-$(arch)-$(runtime) -f $$(<F) .
 	docker run -d -t --platform=linux/$(arch) --name $${PROJECT_NAME}-$(runtime) --rm tf-build-$(arch)-$(runtime)
