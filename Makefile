@@ -38,7 +38,7 @@ start: build
 	@echo "  ./tf-manager-$(OS)-$(ARCH)"
 
 .PHONY: test
-test: build ${TEST_DIR}/test_all.py
+test: ${TEST_DIR}/test_all.py
 	@python3 ${TEST_DIR}/test_all.py
 
 .PHONY: clean
