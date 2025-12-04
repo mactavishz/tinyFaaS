@@ -162,17 +162,17 @@ class TestSieve(TinyFaaSTest):
         self.assertEqual(res.status, 202)
 
         return
-class TestEcho(TinyFaaSTest):
+class TestEchoPY(TinyFaaSTest):
     fn = ""
 
     @classmethod
     def setUpClass(cls) -> None:
-        super(TestEcho, cls).setUpClass()
-        cls.fn = startFunction(path.join(fn_path, "echo"), "echo", "python3", 1)
+        super(TestEchoPY, cls).setUpClass()
+        cls.fn = startFunction(path.join(fn_path, "echo-py"), "echo-py", "python3", 1)
 
     def setUp(self) -> None:
-        super(TestEcho, self).setUp()
-        self.fn = TestEcho.fn
+        super(TestEchoPY, self).setUp()
+        self.fn = TestEchoPY.fn
 
     def test_invoke_http(self) -> None:
         """invoke a function"""
@@ -213,6 +213,9 @@ class TestEchoJS(TinyFaaSTest):
         req = urllib.request.Request(
             f"http://{self.host}:{self.http_port}/{self.fn}",
             data=payload.encode("utf-8"),
+            headers={
+                "Content-Type": "text/plain"
+            }
         )
 
         res = urllib.request.urlopen(req, timeout=10)
@@ -221,6 +224,35 @@ class TestEchoJS(TinyFaaSTest):
         self.assertEqual(res.status, 200)
         self.assertEqual(res.read().decode("utf-8"), payload)
 
+        return
+class TestEchoGo(TinyFaaSTest):
+    fn = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super(TestEchoGo, cls).setUpClass()
+        cls.fn = startFunction(path.join(fn_path, "echo-go"), "echo-go", "go", 1)
+
+    def setUp(self) -> None:
+        super(TestEchoGo, self).setUp()
+        self.fn = TestEchoGo.fn
+
+    def test_invoke_http(self) -> None:
+        """invoke a function"""
+
+        # make a request to the function with a payload
+        payload = "Hello World!"
+
+        req = urllib.request.Request(
+            f"http://{self.host}:{self.http_port}/{self.fn}",
+            data=payload.encode("utf-8"),
+        )
+
+        res = urllib.request.urlopen(req, timeout=10)
+
+        # check the response
+        self.assertEqual(res.status, 200)
+        self.assertEqual(res.read().decode("utf-8"), payload)
         return
 class TestBinary(TinyFaaSTest):
     fn = ""

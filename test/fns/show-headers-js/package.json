@@ -1,1 +1,5 @@
-{"name": "fn", "version": "1.0.0", "main": "index.js"}
+{
+  "name": "handler",
+  "version": "1.0.0",
+  "main": "handler.js"
+}
