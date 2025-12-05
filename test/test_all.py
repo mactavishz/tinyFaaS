@@ -139,7 +139,7 @@ class TestSieve(TinyFaaSTest):
 
         # make a request to the function
         res = urllib.request.urlopen(
-            f"http://{self.host}:{self.http_port}/{self.fn}", timeout=10
+            f"http://{self.host}:{self.http_port}/invoke/{self.fn}", timeout=10
         )
 
         # check the response
@@ -152,7 +152,7 @@ class TestSieve(TinyFaaSTest):
 
         # make an async request to the function
         req = urllib.request.Request(
-            f"http://{self.host}:{self.http_port}/{self.fn}",
+            f"http://{self.host}:{self.http_port}/invoke/{self.fn}",
             headers={"X-tinyFaaS-Async": "true"},
         )
 
@@ -181,7 +181,7 @@ class TestEchoPY(TinyFaaSTest):
         payload = "Hello World!"
 
         req = urllib.request.Request(
-            f"http://{self.host}:{self.http_port}/{self.fn}",
+            f"http://{self.host}:{self.http_port}/invoke/{self.fn}",
             data=payload.encode("utf-8"),
         )
 
@@ -211,7 +211,7 @@ class TestEchoJS(TinyFaaSTest):
         payload = "Hello World!"
 
         req = urllib.request.Request(
-            f"http://{self.host}:{self.http_port}/{self.fn}",
+            f"http://{self.host}:{self.http_port}/invoke/{self.fn}",
             data=payload.encode("utf-8"),
             headers={
                 "Content-Type": "text/plain"
@@ -244,7 +244,7 @@ class TestEchoGo(TinyFaaSTest):
         payload = "Hello World!"
 
         req = urllib.request.Request(
-            f"http://{self.host}:{self.http_port}/{self.fn}",
+            f"http://{self.host}:{self.http_port}/invoke/{self.fn}",
             data=payload.encode("utf-8"),
         )
 
@@ -275,7 +275,7 @@ class TestBinary(TinyFaaSTest):
         payload = "Hello World!"
 
         req = urllib.request.Request(
-            f"http://{self.host}:{self.http_port}/{self.fn}",
+            f"http://{self.host}:{self.http_port}/invoke/{self.fn}",
             data=payload.encode("utf-8"),
         )
 
@@ -305,7 +305,7 @@ class TestShowHeadersJS(TinyFaaSTest):
 
         # make a request to the function with a custom headers
         req = urllib.request.Request(
-            f"http://{self.host}:{self.http_port}/{self.fn}",
+            f"http://{self.host}:{self.http_port}/invoke/{self.fn}",
             headers={"lab": "scalable_software_systems_group"},
         )
 
@@ -344,7 +344,7 @@ class TestShowHeaders(
 
         # make a request to the function with a custom headers
         req = urllib.request.Request(
-            f"http://{self.host}:{self.http_port}/{self.fn}",
+            f"http://{self.host}:{self.http_port}/invoke/{self.fn}",
             headers={"Lab": "scalable_software_systems_group"},
         )
 

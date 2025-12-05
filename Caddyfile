@@ -12,6 +12,7 @@
 	# Function invocation endpoint
 	# Example: curl http://localhost/fn/myfunction
 	handle_path /fn/* {
+		rewrite * /invoke{path}
 		reverse_proxy localhost:8000 {
 			# Pass the original source IP to rproxy for call graph tracking
 			header_up X-FaaS-Source-IP {remote_host}

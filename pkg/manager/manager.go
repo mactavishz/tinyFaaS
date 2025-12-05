@@ -34,9 +34,8 @@ type ManagementService struct {
 	backend               Backend
 	functionHandlers      map[string]Handler
 	functionHandlersMutex sync.Mutex
-	rproxyListenAddress   string
-	rproxyPort            map[string]int
-	rproxyConfigPort      int
+	rproxyAddr            string
+	rproxyPort            int
 }
 
 type Backend interface {
@@ -51,15 +50,14 @@ type Handler interface {
 	Logs() (io.Reader, error)
 }
 
-func New(id string, rproxyListenAddress string, rproxyPort map[string]int, rproxyConfigPort int, tfBackend Backend) *ManagementService {
+func New(id string, rproxyAddr string, rproxyPort int, tfBackend Backend) *ManagementService {
 
 	ms := &ManagementService{
-		id:                  id,
-		backend:             tfBackend,
-		functionHandlers:    make(map[string]Handler),
-		rproxyListenAddress: rproxyListenAddress,
-		rproxyPort:          rproxyPort,
-		rproxyConfigPort:    rproxyConfigPort,
+		id:               id,
+		backend:          tfBackend,
+		functionHandlers: make(map[string]Handler),
+		rproxyAddr:       rproxyAddr,
+		rproxyPort:       rproxyPort,
 	}
 
 	return ms
@@ -168,7 +166,13 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 
 	log.Println("telling rproxy about new function", name, "with ips", fh.IPs(), ":", d)
 
-	resp, err := http.Post(fmt.Sprintf("http://%s:%d", ms.rproxyListenAddress, ms.rproxyConfigPort), "application/json", bytes.NewBuffer(b))
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://%s:%d/config", ms.rproxyAddr, ms.rproxyPort), bytes.NewBuffer(b))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil && !errors.Is(err, io.EOF) {
 		log.Println("error telling rproxy about new function", name, err)
 		return "", err
@@ -246,6 +250,7 @@ func (ms *ManagementService) Wipe() error {
 
 	return nil
 }
+
 func (ms *ManagementService) Delete(name string) error {
 
 	fh, ok := ms.functionHandlers[name]
@@ -264,7 +269,6 @@ func (ms *ManagementService) Delete(name string) error {
 	}
 
 	// tell rproxy about the delete function
-	// curl -X POST http://localhost:80 -d '{"name": "<name>"}'
 	d := struct {
 		FunctionName string `json:"name"`
 	}{
@@ -276,9 +280,15 @@ func (ms *ManagementService) Delete(name string) error {
 		return err
 	}
 
-	log.Println("telling rproxy about deleted function", name)
+	log.Println("telling rproxy to delete function", name)
 
-	resp, err := http.Post(fmt.Sprintf("http://%s:%d", ms.rproxyListenAddress, ms.rproxyConfigPort), "application/json", bytes.NewBuffer(b))
+	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://%s:%d/config", ms.rproxyAddr, ms.rproxyPort), bytes.NewBuffer(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
 
 	if err != nil && !errors.Is(err, io.EOF) {
 		return err
@@ -307,7 +317,6 @@ func (ms *ManagementService) Upload(name string, env string, threads int, zipped
 	// b64 decode zip
 	zip, err := base64.StdEncoding.DecodeString(zipped)
 	if err != nil {
-		// w.WriteHeader(http.StatusBadRequest)
 		log.Println(err)
 		return "", err
 	}
@@ -316,17 +325,13 @@ func (ms *ManagementService) Upload(name string, env string, threads int, zipped
 	n, err := ms.createFunction(name, env, threads, zip, "", envs)
 
 	if err != nil {
-		// w.WriteHeader(http.StatusInternalServerError)
 		log.Println(err)
 		return "", err
 	}
 
 	// return success
 	// w.WriteHeader(http.StatusOK)
-	r := ""
-	for prot, port := range ms.rproxyPort {
-		r += fmt.Sprintf("%s://%s:%d/%s\n", prot, ms.rproxyListenAddress, port, n)
-	}
+	r := fmt.Sprintf("Function %s deployed", n)
 
 	return r, nil
 }
@@ -346,7 +351,6 @@ func (ms *ManagementService) UrlUpload(name string, env string, threads int, fun
 	zip, err := io.ReadAll(resp.Body)
 
 	if err != nil {
-		// w.WriteHeader(http.StatusBadRequest)
 		log.Println(err)
 		return "", err
 	}
@@ -355,18 +359,12 @@ func (ms *ManagementService) UrlUpload(name string, env string, threads int, fun
 	n, err := ms.createFunction(name, env, threads, zip, subfolder, envs)
 
 	if err != nil {
-		// w.WriteHeader(http.StatusInternalServerError)
 		log.Println(err)
 		return "", err
 	}
 
 	// return success
-	// w.WriteHeader(http.StatusOK)
-	r := ""
-	for prot, port := range ms.rproxyPort {
-		r += fmt.Sprintf("%s://%s:%d/%s\n", prot, ms.rproxyListenAddress, port, n)
-	}
-
+	r := fmt.Sprintf("Function %s deployed", n)
 	return r, nil
 }
 

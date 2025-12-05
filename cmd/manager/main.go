@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,13 +19,14 @@ import (
 )
 
 const (
-	ConfigPort       = 8080
-	RProxyConfigPort = 8081
+	ManagerPort = 8080
+	RProxyPort  = 8000
 )
 
 var (
 	// RProxyListenAddress can be overridden via RPROXY_LISTEN_ADDRESS env var
-	RProxyListenAddress = getEnvOrDefault("RPROXY_LISTEN_ADDRESS", "127.0.0.1")
+	RProxyListenAddress  = getEnvOrDefault("RPROXY_LISTEN_ADDRESS", "127.0.0.1")
+	ManagerListenAddress = getEnvOrDefault("MANAGER_LISTEN_ADDRESS", "127.0.0.1")
 )
 
 func getEnvOrDefault(key, defaultValue string) string {
@@ -44,35 +44,6 @@ func main() {
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.SetPrefix("manager: ")
-
-	ports := map[string]int{
-		"http": 8000,
-	}
-
-	for p := range ports {
-		portstr := os.Getenv(p + "_PORT")
-
-		if portstr == "" {
-			continue
-		}
-
-		port, err := strconv.Atoi(portstr)
-
-		if err != nil {
-			log.Fatalf("invalid port for protocol %s: %s (must be an integer!)", p, err)
-		}
-
-		if port < 0 {
-			delete(ports, p)
-			continue
-		}
-
-		if port > 65535 {
-			log.Fatalf("invalid port for protocol %s: %s (must be an integer lower than 65535!)", p, err)
-		}
-
-		ports[p] = port
-	}
 
 	// setting backend to docker
 	id := uuid.New().String()
@@ -97,12 +68,11 @@ func main() {
 	ms := manager.New(
 		id,
 		RProxyListenAddress,
-		ports,
-		RProxyConfigPort,
+		RProxyPort,
 		tfBackend,
 	)
 
-	log.Printf("manager expects rproxy at %s:%d", RProxyListenAddress, RProxyConfigPort)
+	log.Printf("manager expects rproxy at %s:%d", RProxyListenAddress, RProxyPort)
 
 	s := &server{
 		ms: ms,
@@ -118,7 +88,7 @@ func main() {
 	r.HandleFunc("/uploadURL", s.urlUploadHandler)
 
 	// create HTTP server with graceful shutdown support
-	addr := fmt.Sprintf(":%d", ConfigPort)
+	addr := fmt.Sprintf("%s:%d", ManagerListenAddress, ManagerPort)
 	httpServer := &http.Server{
 		Addr:    addr,
 		Handler: r,
