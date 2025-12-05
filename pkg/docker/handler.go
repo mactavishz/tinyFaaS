@@ -31,6 +31,9 @@ const (
 	DEFAULT_PUBLIC_DOMAIN = "tinyfaas.com"
 )
 
+// List of supported runtimes (must match directories in pkg/docker/runtimes)
+var RUNTIMES = []string{"binary", "go", "nodejs", "python3"}
+
 type dockerHandler struct {
 	name        string
 	env         string
@@ -45,13 +48,10 @@ type dockerHandler struct {
 }
 
 type DockerBackend struct {
-	client         *client.Client
-	tinyFaaSID     string
-	gatewayIP      string            // host gateway IP for --add-host (where Caddy runs)
-	publicDomain   string            // public domain for --add-host (e.g., tinyfaas.com)
-	runtimeImages  map[string]string // runtime name -> base image tag
-	runtimesLoaded bool              // whether runtime blobs have been loaded
-	loadMutex      sync.Mutex        // protect runtime loading
+	client       *client.Client
+	tinyFaaSID   string
+	gatewayIP    string // host gateway IP for --add-host (where Caddy runs)
+	publicDomain string // public domain for --add-host (e.g., tinyfaas.com)
 }
 
 func New(tinyFaaSID string) *DockerBackend {
@@ -63,9 +63,8 @@ func New(tinyFaaSID string) *DockerBackend {
 	}
 
 	db := &DockerBackend{
-		client:        client,
-		tinyFaaSID:    tinyFaaSID,
-		runtimeImages: make(map[string]string),
+		client:     client,
+		tinyFaaSID: tinyFaaSID,
 	}
 
 	// Get public domain from environment variable
@@ -85,160 +84,49 @@ func New(tinyFaaSID string) *DockerBackend {
 		log.Printf("TINYFAAS_GATEWAY_IP not set, using default: %s", db.gatewayIP)
 	}
 
-	// Load all runtime base images at startup
-	log.Println("building runtime base images at startup...")
-	if err := db.loadAllRuntimes(); err != nil {
-		log.Printf("warning: failed to build some runtime images: %v", err)
-		// Don't fail startup, allow individual runtimes to build on-demand
+	// Note: Runtime base images must be pre-built using 'make build-runtime-images'
+	// or the build script. Manager expects images to already exist.
+	log.Println("verifying runtime base images...")
+
+	// Verify all runtime base images exist
+	if err := db.verifyRuntimeImages(); err != nil {
+		log.Fatalf("runtime base images not found: %v\nPlease run 'make build-runtime-images' first", err)
+		return nil
 	}
+
+	log.Println("all runtime base images verified")
 
 	return db
 }
 
-// loadAllRuntimes builds all runtime base images at startup
-func (db *DockerBackend) loadAllRuntimes() error {
-	// Get list of available runtimes from embedded filesystem
-	entriesFS, err := runtimes.ReadDir(runtimesDir)
-	if err != nil {
-		return fmt.Errorf("failed to read runtimes directory: %w", err)
-	}
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	errors := []error{}
-
-	for _, entry := range entriesFS {
-		if !entry.IsDir() {
-			continue
+// verifyRuntimeImages checks that all required runtime base images exist
+func (db *DockerBackend) verifyRuntimeImages() error {
+	var missing []string
+	for _, runtime := range RUNTIMES {
+		baseImageTag := db.getRuntimeBaseImage(runtime)
+		_, _, err := db.client.ImageInspectWithRaw(context.Background(), baseImageTag)
+		if err != nil {
+			missing = append(missing, baseImageTag)
+		} else {
+			log.Printf("found runtime base image: %s", baseImageTag)
 		}
-
-		runtimeName := entry.Name()
-		wg.Add(1)
-
-		// Build runtimes in parallel for faster startup
-		go func(runtime string) {
-			defer wg.Done()
-			_, err := db.ensureRuntimeLoaded(runtime)
-			if err != nil {
-				mu.Lock()
-				errors = append(errors, fmt.Errorf("%s: %w", runtime, err))
-				mu.Unlock()
-				log.Printf("error building runtime %s: %v", runtime, err)
-			} else {
-				log.Printf("runtime %s ready", runtime)
-			}
-		}(runtimeName)
 	}
 
-	wg.Wait()
-
-	if len(errors) > 0 {
-		return fmt.Errorf("failed to build %d runtimes: %v", len(errors), errors)
+	if len(missing) > 0 {
+		return fmt.Errorf("missing runtime images: %v", missing)
 	}
 
-	log.Println("all runtime base images ready")
 	return nil
 }
 
 func (db *DockerBackend) Stop() error {
-	// Clean up runtime base images
-	if db.runtimesLoaded {
-		log.Println("cleaning up runtime base images...")
-		for runtime, imageTag := range db.runtimeImages {
-			_, err := db.client.ImageRemove(
-				context.Background(),
-				imageTag,
-				image.RemoveOptions{Force: true},
-			)
-			if err != nil {
-				log.Printf("warning: failed to remove runtime image %s: %s", runtime, err)
-			}
-		}
-	}
 	return nil
 }
 
-// ensureRuntimeLoaded builds the runtime base image from build.Dockerfile if not already built
-// This is called once per runtime, reusing the built image as a base for all functions
-func (db *DockerBackend) ensureRuntimeLoaded(runtime string) (string, error) {
-	db.loadMutex.Lock()
-	defer db.loadMutex.Unlock()
-
-	// Check if already loaded
-	if imageTag, exists := db.runtimeImages[runtime]; exists {
-		return imageTag, nil
-	}
-
-	// Generate base image tag
-	baseImageTag := fmt.Sprintf("tinyfaas-runtime-%s", runtime)
-
-	// Check if image already exists in Docker
-	_, _, err := db.client.ImageInspectWithRaw(context.Background(), baseImageTag)
-	if err == nil {
-		// Image already exists, reuse it
-		log.Printf("runtime base image %s already exists, reusing", baseImageTag)
-		db.runtimeImages[runtime] = baseImageTag
-		db.runtimesLoaded = true
-		return baseImageTag, nil
-	}
-
-	log.Printf("building runtime base image %s from build.Dockerfile...", baseImageTag)
-
-	// Create a temporary directory for the build context
-	buildDir := path.Join(TmpDir, "build-"+runtime)
-	err = os.MkdirAll(buildDir, 0777)
-	if err != nil {
-		return "", fmt.Errorf("failed to create build directory: %w", err)
-	}
-	defer os.RemoveAll(buildDir)
-
-	// Copy runtime files from embedded FS to build directory
-	err = util.CopyDirFromEmbed(runtimes, path.Join(runtimesDir, runtime), buildDir)
-	if err != nil {
-		return "", fmt.Errorf("failed to copy runtime files: %w", err)
-	}
-
-	// Build the base image using build.Dockerfile
-	tar, err := archive.TarWithOptions(buildDir, &archive.TarOptions{})
-	if err != nil {
-		return "", fmt.Errorf("failed to create build context tar: %w", err)
-	}
-
-	buildResp, err := db.client.ImageBuild(
-		context.Background(),
-		tar,
-		types.ImageBuildOptions{
-			Tags:       []string{baseImageTag},
-			Remove:     true,
-			Dockerfile: "build.Dockerfile",
-			Labels: map[string]string{
-				"tinyfaas-runtime": runtime,
-				"tinyfaas-type":    "base-image",
-				// Note: No tinyFaaS session ID label - base images are shared across instances
-			},
-		},
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to build runtime image for %s: %w", runtime, err)
-	}
-
-	defer buildResp.Body.Close()
-	// Read build output
-	scanner := bufio.NewScanner(buildResp.Body)
-	for scanner.Scan() {
-		log.Println(scanner.Text())
-	}
-
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("error reading build output: %w", err)
-	}
-
-	log.Printf("successfully built runtime base image %s", baseImageTag)
-
-	db.runtimeImages[runtime] = baseImageTag
-	db.runtimesLoaded = true
-
-	return baseImageTag, nil
+// getRuntimeBaseImage returns the tag for a runtime's base image
+// Assumes the image was pre-built and exists in Docker
+func (db *DockerBackend) getRuntimeBaseImage(runtime string) string {
+	return fmt.Sprintf("tinyfaas-runtime-%s", runtime)
 }
 
 func (db *DockerBackend) Create(name string, env string, threads int, filedir string, envs map[string]string) (manager.Handler, error) {
@@ -261,11 +149,8 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 	dh.uniqueName = name + "-" + uuid.String()
 	log.Println("creating function", name, "with unique name", dh.uniqueName)
 
-	// Ensure runtime base image is loaded
-	baseImageTag, err := db.ensureRuntimeLoaded(dh.env)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load runtime %s: %w", dh.env, err)
-	}
+	// Get runtime base image tag (verified at startup)
+	baseImageTag := db.getRuntimeBaseImage(dh.env)
 
 	// make a folder for the function
 	// mkdir <folder>
