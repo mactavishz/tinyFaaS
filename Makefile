@@ -34,8 +34,8 @@ help:
 	@echo "  make clean-runtime-images   - Remove runtime base images from Docker"
 	@echo "  make clean-runtimes         - Clean embedded runtime files (forces re-copy on build)"
 	@echo ""
-	@echo "Note: Runtime base images are built automatically at manager startup."
-	@echo "      Use build-runtime-images to pre-build them for faster first startup."
+	@echo "IMPORTANT: Runtime base images must be pre-built before starting manager."
+	@echo "           Run 'make build-runtime-images' or 'make install' first."
 
 .PHONY: bin-name
 bin-name:
@@ -53,13 +53,12 @@ build-rproxy: tf-rproxy-${OS}-${ARCH}
 .PHONY: start
 start: build
 	@echo "Starting tinyFaaS services..."
-	@echo "Start rproxy first, then manager:"
+	@echo "First, ensure runtime base images are built:"
+	@echo "  make build-runtime-images"
+	@echo ""
+	@echo "Then start services (rproxy first, then manager):"
 	@echo "  ./tf-rproxy-$(OS)-$(ARCH) 127.0.0.1:8081 http:127.0.0.1:8000"
 	@echo "  ./tf-manager-$(OS)-$(ARCH)"
-	@echo ""
-	@echo "Note: On first startup, manager will build runtime base images."
-	@echo "      This may take 30-60 seconds. Subsequent starts are faster."
-	@echo "      To pre-build images: make build-runtime-images"
 
 .PHONY: test
 test: ${TEST_DIR}/test_all.py
@@ -108,7 +107,7 @@ rebuild-runtime-images: clean-runtime-images build-runtime-images
 	@echo "Runtime images rebuilt"
 
 .PHONY: install
-install: build
+install: clean-runtimes build build-runtime-images
 	@echo "Installing binaries to $(BINDIR)..."
 	install -d $(BINDIR)
 	install -m 755 tf-manager-$(OS)-$(ARCH) $(BINDIR)/tf-manager
@@ -146,19 +145,17 @@ debug:
 	@echo "OS: $(OS)"
 	@echo "ARCH: $(ARCH)"
 
-# Runtime files that need to be embedded (for current architecture only)
-RUNTIME_FILES := $(shell find pkg/docker/runtimes -type f)
-
-# Copy runtime files to architecture-specific directory for embedding
+# Copy only Dockerfile to architecture-specific directory for embedding
+# (runtime base images must be pre-built, build.Dockerfile and handler files not needed)
 define arch_build
 pkg/docker/runtimes-$(arch): $(foreach runtime,$(RUNTIMES),pkg/docker/runtimes-$(arch)/$(runtime))
 endef
 $(foreach arch,$(SUPPORTED_ARCH),$(eval $(arch_build)))
 
 define runtime_build
-pkg/docker/runtimes-$(arch)/$(runtime): $(wildcard pkg/docker/runtimes/$(runtime)/*)
+pkg/docker/runtimes-$(arch)/$(runtime): pkg/docker/runtimes/$(runtime)/Dockerfile
 	mkdir -p $$@
-	cp -r pkg/docker/runtimes/$(runtime)/* $$@/
+	cp pkg/docker/runtimes/$(runtime)/Dockerfile $$@/
 	@touch $$@
 endef
 $(foreach arch,$(SUPPORTED_ARCH),$(foreach runtime,$(RUNTIMES),$(eval $(runtime_build))))
