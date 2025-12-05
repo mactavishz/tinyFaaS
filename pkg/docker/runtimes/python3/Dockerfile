@@ -1,10 +1,7 @@
-FROM scratch
-
-ADD blob.tar.gz /
+FROM tinyfaas-runtime-python3
 
 EXPOSE 8000
 
-# Create app directory
 WORKDIR /usr/src/app
 
 COPY fn/* ./

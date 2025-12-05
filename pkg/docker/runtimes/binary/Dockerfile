@@ -1,6 +1,4 @@
-FROM scratch
-
-ADD blob.tar.gz /
+FROM tinyfaas-runtime-binary
 
 EXPOSE 8000
 

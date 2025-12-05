@@ -17,6 +17,26 @@ SYSTEMD_DIR ?= /etc/systemd/system
 .PHONY: all
 all: build
 
+.PHONY: help
+help:
+	@echo "tinyFaaS Build System"
+	@echo ""
+	@echo "Main targets:"
+	@echo "  make build                  - Build tf-manager and tf-rproxy binaries"
+	@echo "  make start                  - Show commands to start services"
+	@echo "  make test                   - Run tests"
+	@echo "  make clean                  - Clean build artifacts (preserves embedded runtime files)"
+	@echo "  make install                - Install binaries and systemd services"
+	@echo ""
+	@echo "Runtime management:"
+	@echo "  make build-runtime-images   - Pre-build all runtime base images (optional)"
+	@echo "  make rebuild-runtime-images - Force rebuild all runtime base images"
+	@echo "  make clean-runtime-images   - Remove runtime base images from Docker"
+	@echo "  make clean-runtimes         - Clean embedded runtime files (forces re-copy on build)"
+	@echo ""
+	@echo "Note: Runtime base images are built automatically at manager startup."
+	@echo "      Use build-runtime-images to pre-build them for faster first startup."
+
 .PHONY: bin-name
 bin-name:
 	@echo "tf-manager-$(OS)-$(ARCH) tf-rproxy-$(OS)-$(ARCH)"
@@ -36,6 +56,10 @@ start: build
 	@echo "Start rproxy first, then manager:"
 	@echo "  ./tf-rproxy-$(OS)-$(ARCH) 127.0.0.1:8081 http:127.0.0.1:8000"
 	@echo "  ./tf-manager-$(OS)-$(ARCH)"
+	@echo ""
+	@echo "Note: On first startup, manager will build runtime base images."
+	@echo "      This may take 30-60 seconds. Subsequent starts are faster."
+	@echo "      To pre-build images: make build-runtime-images"
 
 .PHONY: test
 test: ${TEST_DIR}/test_all.py
@@ -54,11 +78,34 @@ clean:
 
 .PHONY: clean-runtimes
 clean-runtimes:
-	@echo "Cleaning runtime blobs..."
+	@echo "Cleaning embedded runtime files..."
 	rm -rf pkg/docker/runtimes-amd64
 	rm -rf pkg/docker/runtimes-arm
 	rm -rf pkg/docker/runtimes-arm64
-	@echo "Runtime blobs cleaned"
+	@echo "Embedded runtime files cleaned"
+
+.PHONY: build-runtime-images
+build-runtime-images:
+	@echo "Building runtime base images locally..."
+	@for runtime in $(RUNTIMES); do \
+		echo "Building tinyfaas-runtime-$$runtime..."; \
+		docker build -t tinyfaas-runtime-$$runtime \
+			--label tinyfaas-runtime=$$runtime \
+			--label tinyfaas-type=base-image \
+			-f pkg/docker/runtimes/$$runtime/build.Dockerfile \
+			pkg/docker/runtimes/$$runtime/ || exit 1; \
+	done
+	@echo "All runtime base images built successfully"
+
+.PHONY: clean-runtime-images
+clean-runtime-images:
+	@echo "Removing runtime base images from Docker..."
+	@docker images --filter "label=tinyfaas-type=base-image" -q | xargs -r docker rmi -f 2>/dev/null || true
+	@echo "Runtime base images removed"
+
+.PHONY: rebuild-runtime-images
+rebuild-runtime-images: clean-runtime-images build-runtime-images
+	@echo "Runtime images rebuilt"
 
 .PHONY: install
 install: build
@@ -99,28 +146,24 @@ debug:
 	@echo "OS: $(OS)"
 	@echo "ARCH: $(ARCH)"
 
+# Runtime files that need to be embedded (for current architecture only)
+RUNTIME_FILES := $(shell find pkg/docker/runtimes -type f)
+
+# Copy runtime files to architecture-specific directory for embedding
 define arch_build
 pkg/docker/runtimes-$(arch): $(foreach runtime,$(RUNTIMES),pkg/docker/runtimes-$(arch)/$(runtime))
 endef
 $(foreach arch,$(SUPPORTED_ARCH),$(eval $(arch_build)))
 
 define runtime_build
-pkg/docker/runtimes-$(arch)/$(runtime): pkg/docker/runtimes-$(arch)/$(runtime)/Dockerfile pkg/docker/runtimes-$(arch)/$(runtime)/blob.tar.gz
-
-pkg/docker/runtimes-$(arch)/$(runtime)/blob.tar.gz: pkg/docker/runtimes/$(runtime)/build.Dockerfile $$(wildcard pkg/docker/runtimes/$(runtime)/*)
-	mkdir -p $$(@D)
-	cd $$(<D) ; docker build --platform=linux/$(arch) -t tf-build-$(arch)-$(runtime) -f $$(<F) .
-	docker run -d -t --platform=linux/$(arch) --name $${PROJECT_NAME}-$(runtime) --rm tf-build-$(arch)-$(runtime)
-	docker export $${PROJECT_NAME}-$(runtime) | gzip > $$@
-	docker kill $${PROJECT_NAME}-$(runtime)
-
-pkg/docker/runtimes-$(arch)/$(runtime)/Dockerfile: pkg/docker/runtimes/$(runtime)/Dockerfile
-	mkdir -p $$(@D)
-	cp -r pkg/docker/runtimes/$(runtime)/Dockerfile $$@
+pkg/docker/runtimes-$(arch)/$(runtime): $(wildcard pkg/docker/runtimes/$(runtime)/*)
+	mkdir -p $$@
+	cp -r pkg/docker/runtimes/$(runtime)/* $$@/
+	@touch $$@
 endef
 $(foreach arch,$(SUPPORTED_ARCH),$(foreach runtime,$(RUNTIMES),$(eval $(runtime_build))))
 
-# Build manager binary (requires runtimes for docker backend)
+# Build manager binary (embeds runtime source files, base images built at startup)
 tf-manager-darwin-%: pkg/docker/runtimes-% $(GO_FILES)
 	GOOS=darwin GOARCH=$* go build -o $@ -v $(PKG)/cmd/manager
 

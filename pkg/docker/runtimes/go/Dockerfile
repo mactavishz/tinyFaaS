@@ -1,12 +1,4 @@
-ARG GO_VERSION=1.25.5
-ARG ALPINE_VERSION=3.23
-
-FROM scratch
-
-# Extract full filesystem with Go toolchain
-ADD blob.tar.gz /
-
-ENV PATH="/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+FROM tinyfaas-runtime-go
 
 WORKDIR /usr/src/app
 
