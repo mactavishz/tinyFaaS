@@ -24,6 +24,8 @@ import (
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
+
+	retry "github.com/avast/retry-go/v5"
 )
 
 const (
@@ -323,96 +325,204 @@ func (dh *dockerHandler) Start() error {
 	log.Printf("dh: %+v", dh)
 	dh.opMux.Lock()
 	defer dh.opMux.Unlock()
-	// start containers
-	// docker start <container>
 
-	wg := sync.WaitGroup{}
-	for _, c := range dh.containers {
-		wg.Add(1)
-		go func(c string) {
-			err := dh.client.ContainerStart(
-				context.Background(),
-				c,
-				container.StartOptions{},
-			)
-			wg.Done()
-			if err != nil {
-				log.Printf("error starting container %s: %s", c, err)
-				return
+	// Track which containers have successfully started and their IPs
+	containerIPs := make(map[string]string)
+	var ipMux sync.Mutex
+
+	// Retry entire start process up to 10 times
+	err := retry.New(
+		retry.Attempts(10),
+		retry.Delay(200*time.Millisecond),
+		retry.OnRetry(func(attempt uint, err error) {
+			log.Printf("start attempt %d/10 failed: %v, retrying only failed containers...", attempt+1, err)
+		}),
+	).Do(func() error {
+		// Start only containers that haven't been successfully started yet
+		var startErrors []error
+		var startMux sync.Mutex
+		wg := sync.WaitGroup{}
+
+		for _, c := range dh.containers {
+			ipMux.Lock()
+			alreadyStarted := containerIPs[c] != ""
+			ipMux.Unlock()
+
+			if alreadyStarted {
+				continue // Skip containers that are already running with IP
 			}
 
-			log.Println("started container", c)
-		}(c)
-	}
-	wg.Wait()
+			wg.Add(1)
+			go func(containerID string) {
+				defer wg.Done()
 
-	// get container IPs
-	// docker inspect <container>
-	for _, containerID := range dh.containers {
-		c, err := dh.client.ContainerInspect(
-			context.Background(),
-			containerID,
-		)
-		if err != nil {
-			return err
-		}
-
-		// Use the network name to get the IP
-		ip := c.NetworkSettings.Networks[dh.networkName].IPAddress
-		dh.handlerIPs = append(dh.handlerIPs, ip)
-
-		log.Println("got ip", ip, "for container", containerID)
-	}
-
-	// wait for the containers to be ready
-	// curl http://<container>:8000/ready
-	for i, ip := range dh.handlerIPs {
-		log.Println("waiting for container", ip, "to be ready")
-		maxRetries := 10
-		for {
-			maxRetries--
-			if maxRetries == 0 {
-				// container did not start properly!
-				// give people some logs to look at
-				log.Printf("container %s (ip %s) not ready after 10 retries", dh.containers[i], ip)
-				log.Printf("getting logs for container %s", dh.containers[i])
-				logs, err := dh.getContainerLogs(dh.containers[i])
-
+				// Start container
+				err := dh.client.ContainerStart(
+					context.Background(),
+					containerID,
+					container.StartOptions{},
+				)
 				if err != nil {
-					return fmt.Errorf("container %s not ready after 10 retries, error encountered when getting logs %s", ip, err)
+					log.Printf("error starting container %s: %s", containerID, err)
+					startMux.Lock()
+					startErrors = append(startErrors, fmt.Errorf("failed to start container %s: %w", containerID, err))
+					startMux.Unlock()
+					return
+				}
+				log.Printf("started container %s", containerID)
+
+				// Get container IP immediately after starting
+				c, err := dh.client.ContainerInspect(
+					context.Background(),
+					containerID,
+				)
+				if err != nil {
+					log.Printf("failed to inspect container %s after start: %v", containerID, err)
+					startMux.Lock()
+					startErrors = append(startErrors, fmt.Errorf("failed to inspect container %s: %w", containerID, err))
+					startMux.Unlock()
+					return
 				}
 
-				log.Println(logs)
+				ip := c.NetworkSettings.Networks[dh.networkName].IPAddress
+				if ip == "" {
+					log.Printf("container %s has no IP address after start", containerID)
+					startMux.Lock()
+					startErrors = append(startErrors, fmt.Errorf("container %s has no IP address", containerID))
+					startMux.Unlock()
+					return
+				}
 
-				log.Printf("end of logs for container %s", dh.containers[i])
-
-				return fmt.Errorf("container %s not ready after 10 retries", ip)
-			}
-
-			// timeout of 1 second
-			client := http.Client{
-				Timeout: 3 * time.Second,
-			}
-
-			resp, err := client.Get("http://" + ip + ":8000/health")
-			if err != nil {
-				log.Println(err)
-				log.Println("retrying in 1 second")
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				log.Println("container", ip, "is ready")
-				break
-			}
-			log.Println("container", ip, "is not ready yet, retrying in 1 second")
-			time.Sleep(1 * time.Second)
+				log.Printf("got ip %s for container %s", ip, containerID)
+				ipMux.Lock()
+				containerIPs[containerID] = ip
+				ipMux.Unlock()
+			}(c)
 		}
+		wg.Wait()
+
+		// If any container failed to start or get IP, return error to trigger retry
+		if len(startErrors) > 0 {
+			return fmt.Errorf("failed to start %d containers: %v", len(startErrors), startErrors)
+		}
+
+		// Build ordered IP list matching container order
+		tempHandlerIPs := make([]string, 0, len(dh.containers))
+		for _, containerID := range dh.containers {
+			ipMux.Lock()
+			ip := containerIPs[containerID]
+			ipMux.Unlock()
+
+			if ip == "" {
+				return fmt.Errorf("container %s missing IP in map", containerID)
+			}
+			tempHandlerIPs = append(tempHandlerIPs, ip)
+		}
+
+		// Store IPs for health checks
+		dh.handlerIPs = tempHandlerIPs
+
+		// Wait for all containers to be ready
+		var healthErrors []error
+		var healthMux sync.Mutex
+
+		for i, ip := range dh.handlerIPs {
+			wg.Add(1)
+			go func(index int, containerIP string) {
+				defer wg.Done()
+				log.Printf("waiting for container %s to be ready", containerIP)
+
+				err := retry.New(
+					retry.Attempts(5),
+					retry.Delay(100*time.Millisecond),
+					retry.OnRetry(func(retryAttempt uint, err error) {
+					}),
+				).Do(func() error {
+					client := http.Client{
+						Timeout: 3 * time.Second,
+					}
+					resp, err := client.Get("http://" + containerIP + ":8000/health")
+					if err != nil {
+						return err
+					}
+					defer resp.Body.Close()
+					if resp.StatusCode == http.StatusOK {
+						log.Printf("container %s is ready", containerIP)
+						return nil
+					}
+					return fmt.Errorf("container health endpoint failed with status: %s", resp.Status)
+				})
+
+				if err != nil {
+					containerID := dh.containers[index]
+					log.Printf("container %s (ip %s) not ready after health check retries", containerID, containerIP)
+
+					healthMux.Lock()
+					healthErrors = append(healthErrors, fmt.Errorf("container %s not ready: %w", containerIP, err))
+					healthMux.Unlock()
+				}
+			}(i, ip)
+		}
+
+		wg.Wait()
+
+		// If any health check failed, return error to trigger retry
+		if len(healthErrors) > 0 {
+			// Log container details for debugging
+			for i := range dh.handlerIPs {
+				containerID := dh.containers[i]
+				logs, logErr := dh.getContainerLogs(containerID)
+				if logErr != nil {
+					log.Printf("error getting logs for container %s: %s", containerID, logErr)
+				} else {
+					log.Printf("logs for container %s:\n%s", containerID, logs)
+				}
+			}
+			return fmt.Errorf("%d containers failed health checks: %v", len(healthErrors), healthErrors)
+		}
+
+		// All containers started and healthy - success!
+		return nil
+	})
+
+	if err != nil {
+		log.Printf("failed to start all containers after 10 retries: %v", err)
+		log.Println("cleaning up partially started containers")
+		dh.stopContainers()
+		return fmt.Errorf("start failed after 10 retries: %w", err)
 	}
 
 	dh.isRunning = true
+	log.Printf("all %d containers started successfully", len(dh.containers))
 	return nil
+}
+
+// stopContainers stops all function containers (used by both Stop and cleanup)
+func (dh *dockerHandler) stopContainers() {
+	wg := sync.WaitGroup{}
+	for _, c := range dh.containers {
+		wg.Add(1)
+		go func(containerID string) {
+			defer wg.Done()
+
+			timeout := 5
+			err := dh.client.ContainerStop(
+				context.Background(),
+				containerID,
+				container.StopOptions{
+					Timeout: &timeout,
+				},
+			)
+			if err != nil {
+				log.Printf("error stopping container %s: %s", containerID, err)
+			} else {
+				log.Printf("stopped container %s", containerID)
+			}
+		}(c)
+	}
+	wg.Wait()
+	dh.handlerIPs = nil
+	dh.isRunning = false
 }
 
 func (dh *dockerHandler) Destroy() error {
@@ -489,8 +599,6 @@ func (dh *dockerHandler) Destroy() error {
 }
 
 func (dh *dockerHandler) getContainerLogs(c string) (string, error) {
-	logs := ""
-
 	l, err := dh.client.ContainerLogs(
 		context.Background(),
 		c,
@@ -501,44 +609,24 @@ func (dh *dockerHandler) getContainerLogs(c string) (string, error) {
 		},
 	)
 	if err != nil {
-		return logs, err
+		return "", err
 	}
+	defer l.Close()
 
 	var lstdout bytes.Buffer
 	var lstderr bytes.Buffer
 
 	_, err = stdcopy.StdCopy(&lstdout, &lstderr, l)
-
-	l.Close()
-
 	if err != nil {
-		return logs, err
+		return "", err
 	}
 
-	// add a prefix to each line
-	// function=<function> handler=<handler> <line>
-	scanner := bufio.NewScanner(&lstdout)
+	// Combine stdout and stderr
+	var logs bytes.Buffer
+	logs.WriteString(lstdout.String())
+	logs.WriteString(lstderr.String())
 
-	for scanner.Scan() {
-		logs += fmt.Sprintf("function=%s handler=%s %s\n", dh.name, c, scanner.Text())
-	}
-
-	if err := scanner.Err(); err != nil {
-		return logs, err
-	}
-
-	// same for stderr
-	scanner = bufio.NewScanner(&lstderr)
-
-	for scanner.Scan() {
-		logs += fmt.Sprintf("function=%s handler=%s %s\n", dh.name, c, scanner.Text())
-	}
-
-	if err := scanner.Err(); err != nil {
-		return logs, err
-	}
-
-	return logs, nil
+	return logs.String(), nil
 }
 
 func (dh *dockerHandler) Logs() (io.Reader, error) {
@@ -548,13 +636,24 @@ func (dh *dockerHandler) Logs() (io.Reader, error) {
 	defer dh.opMux.Unlock()
 	var logs bytes.Buffer
 
-	for _, c := range dh.containers {
+	for i, c := range dh.containers {
+		if len(dh.containers) > 1 {
+			if i > 0 {
+				logs.WriteString("\n")
+			}
+			logs.WriteString(fmt.Sprintf("==================== Container %d/%d: %s ====================\n", i+1, len(dh.containers), c))
+		}
+
 		l, err := dh.getContainerLogs(c)
 		if err != nil {
 			return nil, err
 		}
 
 		logs.WriteString(l)
+
+		if len(dh.containers) > 1 {
+			logs.WriteString(fmt.Sprintf("==================== End of Container %d/%d ====================\n", i+1, len(dh.containers)))
+		}
 	}
 
 	return &logs, nil
@@ -571,33 +670,7 @@ func (dh *dockerHandler) Stop() error {
 	}
 
 	log.Printf("stopping function %s containers", dh.name)
-
-	wg := sync.WaitGroup{}
-	for _, c := range dh.containers {
-		wg.Add(1)
-		go func(c string) {
-			defer wg.Done()
-
-			timeout := 5 // seconds
-			err := dh.client.ContainerStop(
-				context.Background(),
-				c,
-				container.StopOptions{
-					Timeout: &timeout,
-				},
-			)
-			if err != nil {
-				log.Printf("error stopping container %s: %s", c, err)
-			} else {
-				log.Printf("stopped container %s", c)
-			}
-		}(c)
-	}
-	wg.Wait()
-
-	dh.isRunning = false
-	dh.handlerIPs = nil // Clear IPs since containers are stopped
-
+	dh.stopContainers()
 	log.Printf("function %s scaled down", dh.name)
 	return nil
 }
@@ -654,31 +727,32 @@ func (dh *dockerHandler) Restart() error {
 	// Wait for containers to be ready
 	for _, ip := range dh.handlerIPs {
 		log.Printf("waiting for container %s to be ready", ip)
-		maxRetries := 10
-		for {
-			maxRetries--
-			if maxRetries == 0 {
-				return fmt.Errorf("container %s not ready after 10 retries", ip)
-			}
 
+		err := retry.New(
+			retry.Attempts(5),
+			retry.Delay(100*time.Millisecond),
+			retry.OnRetry(func(attempt uint, err error) {
+				log.Printf("health check failed for %s: %v, retrying...", ip, err)
+			}),
+		).Do(func() error {
 			client := http.Client{
 				Timeout: 3 * time.Second,
 			}
-
 			resp, err := client.Get("http://" + ip + ":8000/health")
 			if err != nil {
-				log.Printf("health check failed: %v, retrying in 1 second", err)
-				time.Sleep(1 * time.Second)
-				continue
+				return err
 			}
-			resp.Body.Close()
+			defer resp.Body.Close()
 
 			if resp.StatusCode == http.StatusOK {
 				log.Printf("container %s is ready", ip)
-				break
+				return nil
 			}
-			log.Printf("container %s is not ready yet, retrying in 1 second", ip)
-			time.Sleep(1 * time.Second)
+			return fmt.Errorf("container health endpoint failed with status: %s", resp.Status)
+		})
+
+		if err != nil {
+			return fmt.Errorf("container %s not ready after maximum retries: %w", ip, err)
 		}
 	}
 
