@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	retry "github.com/avast/retry-go/v5"
 )
 
 type Route struct {
@@ -161,41 +163,41 @@ func (r *RProxy) heartbeat(name string) error {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	maxRetries := 3
-	for i := 0; i < maxRetries; i++ {
-		req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
-		if err != nil {
-			return fmt.Errorf("failed to create request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		client := &http.Client{Timeout: 30 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("heartbeat attempt %d failed: %v", i+1, err)
-			if i < maxRetries-1 {
-				time.Sleep(time.Second * time.Duration(i+1))
-				continue
+	err = retry.New(
+		retry.Attempts(3),
+		retry.Delay(100*time.Millisecond),
+		retry.OnRetry(func(attempt uint, err error) {
+			log.Printf("heartbeat attempt %d for %s failed: %v", attempt, name, err)
+		}),
+	).Do(
+		func() error {
+			req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
+			if err != nil {
+				return fmt.Errorf("failed to create request: %w", err)
 			}
-			return fmt.Errorf("failed to trigger heartbeat after %d attempts: %w", maxRetries, err)
-		}
-		defer resp.Body.Close()
+			req.Header.Set("Content-Type", "application/json")
 
-		if resp.StatusCode != http.StatusOK {
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			log.Printf("heartbeat failed with status %d: %s", resp.StatusCode, string(bodyBytes))
-			if i < maxRetries-1 {
-				time.Sleep(time.Second * time.Duration(i+1))
-				continue
+			client := &http.Client{Timeout: 30 * time.Second}
+			resp, err := client.Do(req)
+			if err != nil {
+				return err
 			}
-			return fmt.Errorf("heartbeat failed with status %d", resp.StatusCode)
-		}
+			defer resp.Body.Close()
 
-		log.Printf("successfully triggered heartbeat for %s", name)
-		return nil
+			if resp.StatusCode != http.StatusOK {
+				return err
+			}
+
+			log.Printf("successfully triggered heartbeat for %s", name)
+			return nil
+		},
+	)
+
+	if err != nil {
+		log.Printf("failed to trigger heartbeat for %s: %v", name, err)
+		return err
 	}
-
-	return fmt.Errorf("unexpected error in heartbeat recording")
+	return nil
 }
 
 // triggerColdStart calls the manager to scale up a function
@@ -213,41 +215,37 @@ func (r *RProxy) triggerColdStart(name string) error {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	maxRetries := 3
-	for i := 0; i < maxRetries; i++ {
-		req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
-		if err != nil {
-			return fmt.Errorf("failed to create request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		client := &http.Client{Timeout: 30 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			if i < maxRetries-1 {
-				resp.Body.Close()
-				log.Printf("cold start attempt %d failed: %v", i+1, err)
-				time.Sleep(time.Second * time.Duration(i+1))
-				continue
+	err = retry.New(
+		retry.Attempts(5),
+		retry.Delay(100*time.Millisecond),
+		retry.OnRetry(func(attempt uint, err error) {
+			log.Printf("cold start attempt %d for %s failed: %v", attempt, name, err)
+		}),
+	).Do(
+		func() error {
+			req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
+			if err != nil {
+				return fmt.Errorf("failed to create request: %w", err)
 			}
-			return fmt.Errorf("failed to trigger cold start after %d attempts: %w", maxRetries, err)
-		}
+			req.Header.Set("Content-Type", "application/json")
 
-		if resp.StatusCode != http.StatusOK {
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			log.Printf("cold start attempt %d failed with status %d, body: %v", i+1, resp.StatusCode, string(bodyBytes))
-			if i < maxRetries-1 {
-				resp.Body.Close()
-				time.Sleep(time.Second * time.Duration(i+1))
-				continue
+			client := &http.Client{Timeout: 30 * time.Second}
+			resp, err := client.Do(req)
+			if err != nil {
+				return err
 			}
-			return fmt.Errorf("cold start failed with status %d", resp.StatusCode)
-		}
+			defer resp.Body.Close()
 
-		resp.Body.Close()
-		log.Printf("successfully triggered cold start for %s", name)
-		return nil
+			if resp.StatusCode != http.StatusOK {
+				return err
+			}
+
+			log.Printf("successfully triggered cold start for %s", name)
+			return nil
+		},
+	)
+	if err != nil {
+		log.Printf("failed to trigger cold start for %s: %v", name, err)
 	}
-
-	return fmt.Errorf("unexpected error in cold start")
+	return nil
 }
