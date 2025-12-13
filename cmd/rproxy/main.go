@@ -47,14 +47,10 @@ func main() {
 	mux.HandleFunc("/config", func(w http.ResponseWriter, req *http.Request) {
 		switch req.Method {
 		case http.MethodPut:
-			// Register function IPs
-			log.Printf("config PUT request: %+v", req)
-
 			var def struct {
 				FunctionResource   string   `json:"name"`
 				FunctionContainers []string `json:"ips"`
 			}
-
 			err := json.NewDecoder(req.Body).Decode(&def)
 			if err != nil {
 				w.WriteHeader(http.StatusBadRequest)
@@ -62,7 +58,7 @@ func main() {
 				return
 			}
 
-			log.Printf("registering function: %+v", def)
+			log.Printf("registering function: %s, ips: %v", def.FunctionResource, def.FunctionContainers)
 
 			if def.FunctionResource != "" && def.FunctionResource[0] == '/' {
 				def.FunctionResource = def.FunctionResource[1:]
@@ -86,9 +82,6 @@ func main() {
 			w.Write([]byte("OK"))
 			return
 		case http.MethodDelete:
-			// Delete function completely in the routing table
-			log.Printf("config DELETE request: %+v", req)
-
 			var def struct {
 				FunctionResource string `json:"name"`
 			}
@@ -118,8 +111,6 @@ func main() {
 			return
 		case http.MethodPatch:
 			// Clear function IPs
-			log.Printf("config PATCH request: %+v", req)
-
 			var def struct {
 				FunctionResource string `json:"name"`
 			}
@@ -131,7 +122,7 @@ func main() {
 				return
 			}
 
-			log.Printf("updating function: %s", def.FunctionResource)
+			log.Printf("clearing function ips: %s", def.FunctionResource)
 
 			if def.FunctionResource != "" && def.FunctionResource[0] == '/' {
 				def.FunctionResource = def.FunctionResource[1:]
