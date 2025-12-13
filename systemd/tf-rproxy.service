@@ -15,6 +15,9 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 
+# Environment variables (can be overridden in /etc/default/tf-rproxy)
+EnvironmentFile=-/etc/default/tf-rproxy
+
 # Logging
 StandardOutput=journal
 StandardError=journal

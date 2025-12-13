@@ -45,6 +45,9 @@ type dockerHandler struct {
 	networkName string // per-function network name
 	containers  []string
 	handlerIPs  []string
+	isRunning   bool              // track if containers are running
+	opMux       sync.Mutex        // mutex for start/stop/restart operations
+	labels      map[string]string // store container labels
 }
 
 type DockerBackend struct {
@@ -129,7 +132,7 @@ func (db *DockerBackend) getRuntimeBaseImage(runtime string) string {
 	return fmt.Sprintf("tinyfaas-runtime-%s", runtime)
 }
 
-func (db *DockerBackend) Create(name string, env string, threads int, filedir string, envs map[string]string) (manager.Handler, error) {
+func (db *DockerBackend) Create(name string, env string, threads int, filedir string, envs map[string]string, labels map[string]string) (manager.Handler, error) {
 
 	// make a unique function name by appending uuid string to function name
 	uuid, err := uuid.NewRandom()
@@ -144,6 +147,8 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 		threads:    threads,
 		containers: make([]string, 0, threads),
 		handlerIPs: make([]string, 0, threads),
+		isRunning:  false,
+		labels:     labels,
 	}
 
 	dh.uniqueName = name + "-" + uuid.String()
@@ -258,18 +263,24 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 		log.Printf("adding extra host: %s -> %s", db.publicDomain, db.gatewayIP)
 	}
 
+	// Merge custom labels with system labels
+	containerLabels := map[string]string{
+		"tinyfaas-function": dh.name,
+		"tinyFaaS":          db.tinyFaaSID,
+	}
+	for k, v := range labels {
+		containerLabels[k] = v
+	}
+
 	// create containers
 	// docker run -d --network <network> --name <container> <image>
 	for i := 0; i < dh.threads; i++ {
 		containerResp, err := db.client.ContainerCreate(
 			context.Background(),
 			&container.Config{
-				Image: dh.uniqueName,
-				Labels: map[string]string{
-					"tinyfaas-function": dh.name,
-					"tinyFaaS":          db.tinyFaaSID,
-				},
-				Env: e,
+				Image:  dh.uniqueName,
+				Labels: containerLabels,
+				Env:    e,
 			},
 			&container.HostConfig{
 				NetworkMode: container.NetworkMode(dh.networkName),
@@ -303,12 +314,15 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 }
 
 func (dh *dockerHandler) IPs() []string {
+	dh.opMux.Lock()
+	defer dh.opMux.Unlock()
 	return dh.handlerIPs
 }
 
 func (dh *dockerHandler) Start() error {
 	log.Printf("dh: %+v", dh)
-
+	dh.opMux.Lock()
+	defer dh.opMux.Unlock()
 	// start containers
 	// docker start <container>
 
@@ -397,10 +411,13 @@ func (dh *dockerHandler) Start() error {
 		}
 	}
 
+	dh.isRunning = true
 	return nil
 }
 
 func (dh *dockerHandler) Destroy() error {
+	dh.opMux.Lock()
+	defer dh.opMux.Unlock()
 	log.Println("destroying function", dh.name)
 	log.Printf("dh: %+v", dh)
 
@@ -527,6 +544,8 @@ func (dh *dockerHandler) getContainerLogs(c string) (string, error) {
 func (dh *dockerHandler) Logs() (io.Reader, error) {
 	// get container logs
 	// docker logs <container>
+	dh.opMux.Lock()
+	defer dh.opMux.Unlock()
 	var logs bytes.Buffer
 
 	for _, c := range dh.containers {
@@ -539,4 +558,143 @@ func (dh *dockerHandler) Logs() (io.Reader, error) {
 	}
 
 	return &logs, nil
+}
+
+// Stop stops the function containers without destroying them (for scale-to-zero)
+func (dh *dockerHandler) Stop() error {
+	dh.opMux.Lock()
+	defer dh.opMux.Unlock()
+
+	if !dh.isRunning {
+		log.Printf("function %s is already stopped", dh.name)
+		return nil
+	}
+
+	log.Printf("stopping function %s containers", dh.name)
+
+	wg := sync.WaitGroup{}
+	for _, c := range dh.containers {
+		wg.Add(1)
+		go func(c string) {
+			defer wg.Done()
+
+			timeout := 5 // seconds
+			err := dh.client.ContainerStop(
+				context.Background(),
+				c,
+				container.StopOptions{
+					Timeout: &timeout,
+				},
+			)
+			if err != nil {
+				log.Printf("error stopping container %s: %s", c, err)
+			} else {
+				log.Printf("stopped container %s", c)
+			}
+		}(c)
+	}
+	wg.Wait()
+
+	dh.isRunning = false
+	dh.handlerIPs = nil // Clear IPs since containers are stopped
+
+	log.Printf("function %s scaled down", dh.name)
+	return nil
+}
+
+// Restart restarts previously stopped function containers (for scale-up from scale-to-zero)
+func (dh *dockerHandler) Restart() error {
+	dh.opMux.Lock()
+	defer dh.opMux.Unlock()
+
+	if dh.isRunning {
+		log.Printf("function %s is already running", dh.name)
+		return nil
+	}
+
+	log.Printf("restarting function %s containers", dh.name)
+
+	// Start all containers
+	wg := sync.WaitGroup{}
+	for _, c := range dh.containers {
+		wg.Add(1)
+		go func(c string) {
+			defer wg.Done()
+
+			err := dh.client.ContainerStart(
+				context.Background(),
+				c,
+				container.StartOptions{},
+			)
+			if err != nil {
+				log.Printf("error starting container %s: %s", c, err)
+			} else {
+				log.Printf("restarted container %s", c)
+			}
+		}(c)
+	}
+	wg.Wait()
+
+	// Get new container IPs
+	dh.handlerIPs = make([]string, 0, len(dh.containers))
+	for _, containerID := range dh.containers {
+		c, err := dh.client.ContainerInspect(
+			context.Background(),
+			containerID,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to inspect container %s: %w", containerID, err)
+		}
+
+		ip := c.NetworkSettings.Networks[dh.networkName].IPAddress
+		dh.handlerIPs = append(dh.handlerIPs, ip)
+		log.Printf("got ip %s for container %s", ip, containerID)
+	}
+
+	// Wait for containers to be ready
+	for _, ip := range dh.handlerIPs {
+		log.Printf("waiting for container %s to be ready", ip)
+		maxRetries := 10
+		for {
+			maxRetries--
+			if maxRetries == 0 {
+				return fmt.Errorf("container %s not ready after 10 retries", ip)
+			}
+
+			client := http.Client{
+				Timeout: 3 * time.Second,
+			}
+
+			resp, err := client.Get("http://" + ip + ":8000/health")
+			if err != nil {
+				log.Printf("health check failed: %v, retrying in 1 second", err)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode == http.StatusOK {
+				log.Printf("container %s is ready", ip)
+				break
+			}
+			log.Printf("container %s is not ready yet, retrying in 1 second", ip)
+			time.Sleep(1 * time.Second)
+		}
+	}
+
+	dh.isRunning = true
+	log.Printf("function %s scaled up", dh.name)
+	return nil
+}
+
+// IsRunning returns whether the function containers are currently running
+func (dh *dockerHandler) IsRunning() bool {
+	dh.opMux.Lock()
+	defer dh.opMux.Unlock()
+	return dh.isRunning
+}
+
+// GetLabels returns the container labels for this function
+func (dh *dockerHandler) GetLabels() map[string]string {
+	return dh.labels
 }

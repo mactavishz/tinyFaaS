@@ -9,7 +9,7 @@
 # and Caddy will automatically provision TLS certificates.
 
 :80 {
-	# Function invocation endpoint
+	# Function invocation endpoint (rproxy)
 	# Example: curl http://localhost/fn/myfunction
 	handle_path /fn/* {
 		rewrite * /invoke{path}
@@ -19,7 +19,37 @@
 		}
 	}
 
-	# Function management endpoint
+	# Scale-up endpoint - restricted to rproxy only (internal service calls)
+	# Only allows requests originating from localhost (rproxy service)
+	handle_path /system/scale-up {
+		@from_rproxy remote_ip 127.0.0.1 ::1
+		handle @from_rproxy {
+			rewrite * /scale-up
+			reverse_proxy localhost:8080 {
+				header_up X-FaaS-Source-IP {remote_host}
+			}
+		}
+		handle {
+			respond "Forbidden: scale-up endpoint is restricted to internal services only" 403
+		}
+	}
+
+	# Heartbeat endpoint - restricted to rproxy only (internal service calls)
+	# Only allows requests originating from localhost (rproxy service)
+	handle_path /system/heartbeat {
+		@from_rproxy remote_ip 127.0.0.1 ::1
+		handle @from_rproxy {
+			rewrite * /heartbeat
+			reverse_proxy localhost:8080 {
+				header_up X-FaaS-Source-IP {remote_host}
+			}
+		}
+		handle {
+			respond "Forbidden: heartbeat endpoint is restricted to internal services only" 403
+		}
+	}
+
+	# Function management endpoint (manager)
 	# Example: curl -X POST http://localhost/system/upload -d '...'
 	handle_path /system/* {
 		reverse_proxy localhost:8080 {

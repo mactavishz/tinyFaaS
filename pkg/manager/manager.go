@@ -15,6 +15,7 @@ import (
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 	"github.com/google/uuid"
+	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
 )
 
 var (
@@ -36,18 +37,23 @@ type ManagementService struct {
 	functionHandlersMutex sync.Mutex
 	rproxyAddr            string
 	rproxyPort            int
+	autoscaler            *autoscaler.AutoScaler
 }
 
 type Backend interface {
-	Create(name string, env string, threads int, filedir string, envs map[string]string) (Handler, error)
+	Create(name string, env string, threads int, filedir string, envs map[string]string, labels map[string]string) (Handler, error)
 	Stop() error
 }
 
 type Handler interface {
 	IPs() []string
 	Start() error
+	Stop() error
+	Restart() error
 	Destroy() error
 	Logs() (io.Reader, error)
+	IsRunning() bool
+	GetLabels() map[string]string
 }
 
 func New(id string, rproxyAddr string, rproxyPort int, tfBackend Backend) *ManagementService {
@@ -63,7 +69,7 @@ func New(id string, rproxyAddr string, rproxyPort int, tfBackend Backend) *Manag
 	return ms
 }
 
-func (ms *ManagementService) createFunction(name string, env string, threads int, funczip []byte, subfolderPath string, envs map[string]string) (string, error) {
+func (ms *ManagementService) createFunction(name string, env string, threads int, funczip []byte, subfolderPath string, envs map[string]string, labels map[string]string) (string, error) {
 
 	// validate function name according to RFC 1035 DNS label rules
 	if !util.IsValidFunctionName(name) {
@@ -126,23 +132,20 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 
 	// if function already exists, keep it while deploying the new version
 	var oldHandler Handler
+	ms.functionHandlersMutex.Lock()
 	if existingHandler, ok := ms.functionHandlers[name]; ok {
 		oldHandler = existingHandler
 	}
+	ms.functionHandlersMutex.Unlock()
 
 	// create new function handler
-	ms.functionHandlersMutex.Lock()
-	defer ms.functionHandlersMutex.Unlock()
-
-	fh, err := ms.backend.Create(name, env, threads, p, envs)
+	fh, err := ms.backend.Create(name, env, threads, p, envs, labels)
 
 	if err != nil {
 		return "", err
 	}
 
-	ms.functionHandlers[name] = fh
-
-	err = ms.functionHandlers[name].Start()
+	err = fh.Start()
 
 	if err != nil {
 		// container did not start properly...
@@ -150,7 +153,7 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	}
 
 	// tell rproxy about the new function
-	// curl -X POST http://localhost:80/add -d '{"name": "<name>", "ips": ["<ip1>", "<ip2>"]}'
+	// curl -X PUT http://<rproxyAddr>:<rproxyPort>/config -d '{"name": "<name>", "ips": ["<ip1>", "<ip2>"]}'
 	d := struct {
 		FunctionName string   `json:"name"`
 		FunctionIPs  []string `json:"ips"`
@@ -190,6 +193,16 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	}
 
 	log.Println("rproxy response:", string(r))
+
+	ms.functionHandlersMutex.Lock()
+	ms.functionHandlers[name] = fh
+	ms.functionHandlersMutex.Unlock()
+
+	// Register with autoscaler
+	if ms.autoscaler != nil {
+		// overwrite registration if function already exists
+		ms.autoscaler.RegisterFunction(name, labels)
+	}
 
 	// destroy the old handler if it exists
 	if oldHandler != nil {
@@ -309,10 +322,15 @@ func (ms *ManagementService) Delete(name string) error {
 
 	delete(ms.functionHandlers, name)
 
+	// Unregister from autoscaler
+	if ms.autoscaler != nil {
+		ms.autoscaler.UnregisterFunction(name)
+	}
+
 	return nil
 }
 
-func (ms *ManagementService) Upload(name string, env string, threads int, zipped string, envs map[string]string) (string, error) {
+func (ms *ManagementService) Upload(name string, env string, threads int, zipped string, envs map[string]string, labels map[string]string) (string, error) {
 
 	// b64 decode zip
 	zip, err := base64.StdEncoding.DecodeString(zipped)
@@ -322,7 +340,7 @@ func (ms *ManagementService) Upload(name string, env string, threads int, zipped
 	}
 
 	// create function handler
-	n, err := ms.createFunction(name, env, threads, zip, "", envs)
+	n, err := ms.createFunction(name, env, threads, zip, "", envs, labels)
 
 	if err != nil {
 		log.Println(err)
@@ -336,7 +354,7 @@ func (ms *ManagementService) Upload(name string, env string, threads int, zipped
 	return r, nil
 }
 
-func (ms *ManagementService) UrlUpload(name string, env string, threads int, funcurl string, subfolder string, envs map[string]string) (string, error) {
+func (ms *ManagementService) UrlUpload(name string, env string, threads int, funcurl string, subfolder string, envs map[string]string, labels map[string]string) (string, error) {
 
 	// download url
 	resp, err := http.Get(funcurl)
@@ -356,7 +374,7 @@ func (ms *ManagementService) UrlUpload(name string, env string, threads int, fun
 	}
 
 	// create function handler
-	n, err := ms.createFunction(name, env, threads, zip, subfolder, envs)
+	n, err := ms.createFunction(name, env, threads, zip, subfolder, envs, labels)
 
 	if err != nil {
 		log.Println(err)

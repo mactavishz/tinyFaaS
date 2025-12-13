@@ -13,7 +13,10 @@ import (
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/rproxy"
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
+	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
 )
+
+var emptyBody = []byte{}
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -29,13 +32,22 @@ func main() {
 
 	r := rproxy.New()
 
+	// Initialize autoscaler for activity tracking
+	autoscalerConfig := autoscaler.NewConfigFromEnv("tinyfaas")
+	if autoscalerConfig.Enabled {
+		r.SetAutoScalerEnabled(true)
+		log.Printf("autoscaler enabled")
+	} else {
+		log.Printf("autoscaler disabled")
+	}
 	// Create single HTTP server with multiple endpoints
 	mux := http.NewServeMux()
 
 	// Config endpoint - function registration (PUT)
 	mux.HandleFunc("/config", func(w http.ResponseWriter, req *http.Request) {
-		if req.Method == http.MethodPut {
-			// Register function
+		switch req.Method {
+		case http.MethodPut:
+			// Register function IPs
 			log.Printf("config PUT request: %+v", req)
 
 			var def struct {
@@ -73,9 +85,8 @@ func main() {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("OK"))
 			return
-
-		} else if req.Method == http.MethodDelete {
-			// Delete function
+		case http.MethodDelete:
+			// Delete function completely in the routing table
 			log.Printf("config DELETE request: %+v", req)
 
 			var def struct {
@@ -105,8 +116,38 @@ func main() {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("OK"))
 			return
+		case http.MethodPatch:
+			// Clear function IPs
+			log.Printf("config PATCH request: %+v", req)
 
-		} else {
+			var def struct {
+				FunctionResource string `json:"name"`
+			}
+
+			err := json.NewDecoder(req.Body).Decode(&def)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				log.Printf("failed to decode request: %v", err)
+				return
+			}
+
+			log.Printf("updating function: %s", def.FunctionResource)
+
+			if def.FunctionResource != "" && def.FunctionResource[0] == '/' {
+				def.FunctionResource = def.FunctionResource[1:]
+			}
+
+			err = r.Update(def.FunctionResource)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				log.Printf("failed to delete function: %v", err)
+				return
+			}
+
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("OK"))
+			return
+		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -150,16 +191,11 @@ func main() {
 
 		s, res := r.Call(functionName, req_body, async, headers)
 
-		switch s {
-		case rproxy.StatusOK:
-			w.WriteHeader(http.StatusOK)
+		w.WriteHeader(s)
+		if res != nil {
 			w.Write(res)
-		case rproxy.StatusAccepted:
-			w.WriteHeader(http.StatusAccepted)
-		case rproxy.StatusNotFound:
-			w.WriteHeader(http.StatusNotFound)
-		case rproxy.StatusError:
-			w.WriteHeader(http.StatusInternalServerError)
+		} else {
+			w.Write(emptyBody)
 		}
 	})
 

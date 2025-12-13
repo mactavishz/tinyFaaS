@@ -5,6 +5,7 @@ go 1.23.0
 require (
 	github.com/docker/docker v27.0.0+incompatible
 	github.com/google/uuid v1.6.0
+	github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler v0.0.0
 )
 
 require (
@@ -45,3 +46,5 @@ require (
 	google.golang.org/protobuf v1.34.2 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
 )
+
+replace github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler => ../autoscaler

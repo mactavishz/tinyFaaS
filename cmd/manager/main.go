@@ -16,6 +16,7 @@ import (
 	"github.com/OpenFogStack/tinyFaaS/pkg/docker"
 	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
 	"github.com/google/uuid"
+	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
 )
 
 const (
@@ -74,6 +75,13 @@ func main() {
 
 	log.Printf("manager expects rproxy at %s:%d", RProxyListenAddress, RProxyPort)
 
+	// Initialize autoscaler
+	autoscalerConfig := autoscaler.NewConfigFromEnv("tinyfaas")
+	scaleOp := manager.NewTinyFaaSScaleOp(ms)
+	as := autoscaler.New(autoscalerConfig, scaleOp)
+	ms.SetAutoScaler(as)
+	as.Start()
+
 	s := &server{
 		ms: ms,
 	}
@@ -86,6 +94,8 @@ func main() {
 	r.HandleFunc("/wipe", s.wipeHandler)
 	r.HandleFunc("/logs", s.logsHandler)
 	r.HandleFunc("/uploadURL", s.urlUploadHandler)
+	r.HandleFunc("/scale-up", s.scaleUpHandler)
+	r.HandleFunc("/heartbeat", s.heartbeatHandler)
 
 	// create HTTP server with graceful shutdown support
 	addr := fmt.Sprintf("%s:%d", ManagerListenAddress, ManagerPort)
@@ -122,6 +132,10 @@ func main() {
 		log.Printf("HTTP server shutdown error: %v", err)
 	}
 
+	// stop autoscaler
+	log.Println("stopping autoscaler...")
+	as.Stop()
+
 	// stop management service (cleans up function containers)
 	log.Println("stopping management service...")
 	if err := ms.Stop(); err != nil {
@@ -141,11 +155,12 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	// parse request
 	d := struct {
-		FunctionName    string   `json:"name"`
-		FunctionEnv     string   `json:"env"`
-		FunctionThreads int      `json:"threads"`
-		FunctionZip     string   `json:"zip"`
-		FunctionEnvs    []string `json:"envs"`
+		FunctionName    string            `json:"name"`
+		FunctionEnv     string            `json:"env"`
+		FunctionThreads int               `json:"threads"`
+		FunctionZip     string            `json:"zip"`
+		FunctionEnvs    []string          `json:"envs"`
+		FunctionLabels  map[string]string `json:"labels"`
 	}{}
 
 	err := json.NewDecoder(r.Body).Decode(&d)
@@ -155,7 +170,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Println("got request to upload function: Name", d.FunctionName, "Env", d.FunctionEnv, "Threads", d.FunctionThreads, "Bytes", len(d.FunctionZip), "Envs", d.FunctionEnvs)
+	log.Println("got request to upload function: Name", d.FunctionName, "Env", d.FunctionEnv, "Threads", d.FunctionThreads, "Bytes", len(d.FunctionZip), "Envs", d.FunctionEnvs, "Labels", d.FunctionLabels)
 
 	envs := make(map[string]string)
 	for _, e := range d.FunctionEnvs {
@@ -169,7 +184,11 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 		envs[k] = v
 	}
 
-	res, err := s.ms.Upload(d.FunctionName, d.FunctionEnv, d.FunctionThreads, d.FunctionZip, envs)
+	if d.FunctionLabels == nil {
+		d.FunctionLabels = make(map[string]string)
+	}
+
+	res, err := s.ms.Upload(d.FunctionName, d.FunctionEnv, d.FunctionThreads, d.FunctionZip, envs, d.FunctionLabels)
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -298,12 +317,13 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	// parse request
 	d := struct {
-		FunctionName    string   `json:"name"`
-		FunctionEnv     string   `json:"env"`
-		FunctionThreads int      `json:"threads"`
-		FunctionURL     string   `json:"url"`
-		FunctionEnvs    []string `json:"envs"`
-		SubFolder       string   `json:"subfolder_path"`
+		FunctionName    string            `json:"name"`
+		FunctionEnv     string            `json:"env"`
+		FunctionThreads int               `json:"threads"`
+		FunctionURL     string            `json:"url"`
+		FunctionEnvs    []string          `json:"envs"`
+		SubFolder       string            `json:"subfolder_path"`
+		FunctionLabels  map[string]string `json:"labels"`
 	}{}
 
 	err := json.NewDecoder(r.Body).Decode(&d)
@@ -327,7 +347,11 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 		envs[k] = v
 	}
 
-	res, err := s.ms.UrlUpload(d.FunctionName, d.FunctionEnv, d.FunctionThreads, d.FunctionURL, d.SubFolder, envs)
+	if d.FunctionLabels == nil {
+		d.FunctionLabels = make(map[string]string)
+	}
+
+	res, err := s.ms.UrlUpload(d.FunctionName, d.FunctionEnv, d.FunctionThreads, d.FunctionURL, d.SubFolder, envs, d.FunctionLabels)
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -338,4 +362,74 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 	// return success
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, res)
+}
+
+func (s *server) scaleUpHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	// parse request
+	d := struct {
+		FunctionName string `json:"name"`
+	}{}
+
+	err := json.NewDecoder(r.Body).Decode(&d)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+		log.Println(err)
+		return
+	}
+
+	log.Println("got request to scale up function:", d.FunctionName)
+
+	// scale up function
+	err = s.ms.ScaleUp(d.FunctionName)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		log.Println("Failed to scale up function:", err)
+		return
+	}
+
+	// return success
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Function %s scaled up", d.FunctionName)
+}
+
+func (s *server) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	// parse request
+	d := struct {
+		FunctionName string `json:"name"`
+	}{}
+
+	err := json.NewDecoder(r.Body).Decode(&d)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		log.Println(err)
+		return
+	}
+
+	log.Println("got request to heartbeat function:", d.FunctionName)
+
+	// heartbeat function
+	err = s.ms.Heartbeat(d.FunctionName)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Println(err)
+		return
+	}
+
+	// return success
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Function %s heartbeat recorded", d.FunctionName)
 }
