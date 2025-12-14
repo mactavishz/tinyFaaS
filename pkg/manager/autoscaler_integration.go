@@ -6,20 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
+	"go.uber.org/zap"
 )
 
 // TinyFaaSScaleOp implements the autoscaler.ScaleOperation interface for tinyFaaS
 type TinyFaaSScaleOp struct {
-	ms *ManagementService
+	ms     *ManagementService
+	logger *zap.Logger
 }
 
 // NewTinyFaaSScaleOp creates a new TinyFaaSScaleOp
-func NewTinyFaaSScaleOp(ms *ManagementService) *TinyFaaSScaleOp {
-	return &TinyFaaSScaleOp{ms: ms}
+func NewTinyFaaSScaleOp(ms *ManagementService, logger *zap.Logger) *TinyFaaSScaleOp {
+	return &TinyFaaSScaleOp{ms: ms, logger: logger}
 }
 
 // ScaleDown stops the function containers
@@ -33,7 +34,7 @@ func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 	}
 
 	if err := op.notifyRProxyClearIPs(functionName); err != nil {
-		log.Printf("failed to notify rproxy about scale down of %s: %v", functionName, err)
+		op.logger.Error("failed to notify rproxy about scale down", zap.String("function", functionName), zap.Error(err))
 		return fmt.Errorf("failed to notify rproxy about scale down: %w", err)
 	}
 
@@ -45,7 +46,7 @@ func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 		return fmt.Errorf("failed to stop function %s: %w", functionName, err)
 	}
 
-	log.Printf("scaled down function %s", functionName)
+	op.logger.Info("function scaled down", zap.String("function", functionName))
 	return nil
 }
 
@@ -66,11 +67,11 @@ func (op *TinyFaaSScaleOp) ScaleUp(functionName string) error {
 
 	// Notify rproxy to add function back to routing table
 	if err := op.notifyRProxyAdd(functionName, handler.IPs()); err != nil {
-		log.Printf("error: failed to notify rproxy about scale up of %s: %v", functionName, err)
+		op.logger.Error("failed to notify rproxy", zap.String("function", functionName), zap.Error(err))
 		return fmt.Errorf("function restarted but rproxy notification failed: %w", err)
 	}
 
-	log.Printf("scaled up function %s", functionName)
+	op.logger.Info("function scaled up", zap.String("function", functionName))
 	return nil
 }
 

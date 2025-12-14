@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,8 +14,10 @@ import (
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/docker"
 	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
+	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 	"github.com/google/uuid"
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
+	"go.uber.org/zap"
 )
 
 const (
@@ -26,25 +27,18 @@ const (
 
 var (
 	// RProxyListenAddress can be overridden via RPROXY_LISTEN_ADDRESS env var
-	RProxyListenAddress  = getEnvOrDefault("RPROXY_LISTEN_ADDRESS", "127.0.0.1")
-	ManagerListenAddress = getEnvOrDefault("MANAGER_LISTEN_ADDRESS", "127.0.0.1")
+	RProxyListenAddress  = util.GetEnvOrDefault("RPROXY_LISTEN_ADDRESS", "127.0.0.1")
+	ManagerListenAddress = util.GetEnvOrDefault("MANAGER_LISTEN_ADDRESS", "127.0.0.1")
 )
 
-func getEnvOrDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
 type server struct {
-	ms *manager.ManagementService
+	ms     *manager.ManagementService
+	logger *zap.Logger
 }
 
 func main() {
-
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.SetPrefix("manager: ")
+	logger := util.CreateLogger()
+	defer logger.Sync() // flushes buffer, if any
 
 	// setting backend to docker
 	id := uuid.New().String()
@@ -54,16 +48,16 @@ func main() {
 
 	if !ok {
 		backend = "docker"
-		log.Println("using default backend docker")
+		logger.Info("using default backend docker")
 	}
 
 	var tfBackend manager.Backend
 	switch backend {
 	case "docker":
-		log.Println("using docker backend")
-		tfBackend = docker.New(id)
+		logger.Info("using docker backend")
+		tfBackend = docker.New(id, logger)
 	default:
-		log.Fatalf("invalid backend %s", backend)
+		logger.Fatal("invalid backend", zap.String("backend", backend))
 	}
 
 	ms := manager.New(
@@ -71,19 +65,21 @@ func main() {
 		RProxyListenAddress,
 		RProxyPort,
 		tfBackend,
+		logger,
 	)
 
-	log.Printf("manager expects rproxy at %s:%d", RProxyListenAddress, RProxyPort)
+	logger.Info("manager expects rproxy", zap.String("address", RProxyListenAddress), zap.Int("port", RProxyPort))
 
 	// Initialize autoscaler
 	autoscalerConfig := autoscaler.NewConfigFromEnv("tinyfaas")
-	scaleOp := manager.NewTinyFaaSScaleOp(ms)
-	as := autoscaler.New(autoscalerConfig, scaleOp)
+	scaleOp := manager.NewTinyFaaSScaleOp(ms, logger)
+	as := autoscaler.New(autoscalerConfig, scaleOp, logger)
 	ms.SetAutoScaler(as)
 	as.Start()
 
 	s := &server{
-		ms: ms,
+		ms:     ms,
+		logger: logger,
 	}
 
 	// create handlers
@@ -110,44 +106,43 @@ func main() {
 
 	// start HTTP server in goroutine
 	go func() {
-		log.Println("starting HTTP server on", addr)
+		logger.Info("starting HTTP server", zap.String("address", addr))
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal(err)
+			logger.Fatal("HTTP server error", zap.Error(err))
 		}
 	}()
 
 	// wait for shutdown signal
 	<-sig
 
-	log.Println("received interrupt signal")
-	log.Println("initiating graceful shutdown...")
+	logger.Info("received interrupt signal")
+	logger.Info("initiating graceful shutdown...")
 
 	// create context with timeout for graceful shutdown
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
 	// gracefully shutdown HTTP server
-	log.Println("shutting down HTTP server...")
+	logger.Info("shutting down HTTP server...")
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("HTTP server shutdown error: %v", err)
+		logger.Error("HTTP server shutdown error", zap.Error(err))
 	}
 
 	// stop autoscaler
-	log.Println("stopping autoscaler...")
+	logger.Info("stopping autoscaler...")
 	as.Stop()
 
 	// stop management service (cleans up function containers)
-	log.Println("stopping management service...")
+	logger.Info("stopping management service...")
 	if err := ms.Stop(); err != nil {
-		log.Printf("management service shutdown error: %v", err)
+		logger.Error("management service shutdown error", zap.Error(err))
 	}
 
-	log.Println("shutdown complete")
+	logger.Info("shutdown complete")
 	os.Exit(0)
 }
 
 func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
-
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -166,18 +161,17 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&d)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		log.Println(err)
+		s.logger.Error("failed to decode upload request", zap.Error(err))
 		return
 	}
 
-	log.Println("got request to upload function: Name", d.FunctionName, "Env", d.FunctionEnv, "Threads", d.FunctionThreads, "Bytes", len(d.FunctionZip), "Envs", d.FunctionEnvs, "Labels", d.FunctionLabels)
-
+	s.logger.Info("receive upload request", zap.String("name", d.FunctionName), zap.String("env", d.FunctionEnv), zap.Int("threads", d.FunctionThreads), zap.Int("bytes", len(d.FunctionZip)), zap.Strings("envs", d.FunctionEnvs), zap.Any("labels", d.FunctionLabels))
 	envs := make(map[string]string)
 	for _, e := range d.FunctionEnvs {
 		k, v, ok := strings.Cut(e, "=")
 
 		if !ok {
-			log.Println("invalid env:", e)
+			s.logger.Warn("invalid env", zap.String("env", e))
 			continue
 		}
 
@@ -192,7 +186,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Println(err)
+		s.logger.Error("failed to upload function", zap.Error(err))
 		return
 	}
 
@@ -216,18 +210,18 @@ func (s *server) deleteHandler(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&d)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		log.Println(err)
+		s.logger.Error("failed to decode delete request", zap.Error(err))
 		return
 	}
 
-	log.Println("got request to delete function:", d.FunctionName)
+	s.logger.Info("receive delete request", zap.String("name", d.FunctionName))
 
 	// delete function
 	err = s.ms.Delete(d.FunctionName)
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Println(err)
+		s.logger.Error("failed to delete function", zap.String("name", d.FunctionName), zap.Error(err))
 		return
 	}
 
@@ -241,6 +235,7 @@ func (s *server) listHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.logger.Info("receive list request")
 	l := s.ms.List()
 
 	// return success
@@ -256,11 +251,12 @@ func (s *server) wipeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.logger.Info("receive wipe request")
 	err := s.ms.Wipe()
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Println(err)
+		s.logger.Error("failed to wipe functions", zap.Error(err))
 		return
 	}
 
@@ -268,7 +264,6 @@ func (s *server) wipeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
-
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -277,12 +272,13 @@ func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
 	// parse request
 	var logs io.Reader
 	name := r.URL.Query().Get("name")
+	s.logger.Info("receive logs request", zap.String("function_name", name))
 
 	if name == "" {
 		l, err := s.ms.Logs()
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			log.Println(err)
+			s.logger.Error("failed to get logs", zap.Error(err))
 			return
 		}
 		logs = l
@@ -292,7 +288,7 @@ func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
 		l, err := s.ms.LogsFunction(name)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			log.Println(err)
+			s.logger.Error("failed to get logs for function", zap.String("name", name), zap.Error(err))
 			return
 		}
 		logs = l
@@ -300,11 +296,11 @@ func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
 
 	// return success
 	w.WriteHeader(http.StatusOK)
-	// w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Content-Type", "text/plain")
 	_, err := io.Copy(w, logs)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Println(err)
+		s.logger.Error("failed to write logs to response", zap.Error(err))
 		return
 	}
 }
@@ -329,18 +325,18 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&d)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		log.Println(err)
+		s.logger.Error("failed to decode url upload request", zap.Error(err))
 		return
 	}
 
-	log.Println("got request to upload function:", d)
+	s.logger.Info("receive url upload request", zap.String("name", d.FunctionName), zap.String("env", d.FunctionEnv), zap.Int("threads", d.FunctionThreads), zap.String("url", d.FunctionURL), zap.Strings("envs", d.FunctionEnvs), zap.String("subfolder", d.SubFolder), zap.Any("labels", d.FunctionLabels))
 
 	envs := make(map[string]string)
 	for _, e := range d.FunctionEnvs {
 		k, v, ok := strings.Cut(e, "=")
 
 		if !ok {
-			log.Println("invalid env:", e)
+			s.logger.Warn("invalid env", zap.String("env", e))
 			continue
 		}
 
@@ -355,7 +351,7 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Println(err)
+		s.logger.Error("failed to upload function from url", zap.Error(err))
 		return
 	}
 
@@ -379,25 +375,24 @@ func (s *server) scaleUpHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(err.Error()))
-		log.Println(err)
+		s.logger.Error("failed to decode scale up request", zap.Error(err))
 		return
 	}
 
-	log.Println("got request to scale up function:", d.FunctionName)
-
+	s.logger.Info("receive scale up request", zap.String("name", d.FunctionName))
 	// scale up function
 	err = s.ms.ScaleUp(d.FunctionName)
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(err.Error()))
-		log.Println("Failed to scale up function:", err)
+		s.logger.Error("failed to scale up function", zap.String("name", d.FunctionName), zap.Error(err))
 		return
 	}
 
 	// return success
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "Function %s scaled up", d.FunctionName)
+	s.logger.Info("function scaled up successfully", zap.String("name", d.FunctionName))
 }
 
 func (s *server) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
@@ -414,22 +409,22 @@ func (s *server) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&d)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		log.Println(err)
+		s.logger.Error("failed to decode heartbeat request", zap.Error(err))
 		return
 	}
 
-	log.Println("got request to heartbeat function:", d.FunctionName)
+	s.logger.Info("receive heartbeat request", zap.String("name", d.FunctionName))
 
 	// heartbeat function
 	err = s.ms.Heartbeat(d.FunctionName)
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Println(err)
+		s.logger.Error("failed to record heartbeat", zap.String("name", d.FunctionName), zap.Error(err))
 		return
 	}
 
 	// return success
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "Function %s heartbeat recorded", d.FunctionName)
+	s.logger.Info("heartbeat recorded successfully", zap.String("name", d.FunctionName))
 }

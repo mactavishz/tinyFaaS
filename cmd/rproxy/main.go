@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,31 +13,30 @@ import (
 	"github.com/OpenFogStack/tinyFaaS/pkg/rproxy"
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
+	"go.uber.org/zap"
 )
 
 var emptyBody = []byte{}
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.SetPrefix("rproxy: ")
+	logger := util.CreateLogger()
+	defer logger.Sync() // flushes buffer, if any
 
 	if len(os.Args) < 2 {
-		log.Printf("invalid number of arguments")
-		log.Printf("usage: ./rproxy <listen-addr>")
-		os.Exit(1)
+		logger.Fatal("invalid number of arguments", zap.String("usage", "./rproxy <listen-addr>"))
 	}
 
 	listenAddr := os.Args[1]
 
-	r := rproxy.New()
+	r := rproxy.New(logger)
 
 	// Initialize autoscaler for activity tracking
 	autoscalerConfig := autoscaler.NewConfigFromEnv("tinyfaas")
 	if autoscalerConfig.Enabled {
 		r.SetAutoScalerEnabled(true)
-		log.Printf("autoscaler enabled")
+		logger.Info("autoscaler enabled")
 	} else {
-		log.Printf("autoscaler disabled")
+		logger.Info("autoscaler disabled")
 	}
 	// Create single HTTP server with multiple endpoints
 	mux := http.NewServeMux()
@@ -54,12 +52,11 @@ func main() {
 			err := json.NewDecoder(req.Body).Decode(&def)
 			if err != nil {
 				w.WriteHeader(http.StatusBadRequest)
-				log.Printf("failed to decode request: %v", err)
+				logger.Error("failed to decode request", zap.Error(err))
 				return
 			}
 
-			log.Printf("registering function: %s, ips: %v", def.FunctionResource, def.FunctionContainers)
-
+			logger.Info("registering function", zap.String("name", def.FunctionResource), zap.Strings("ips", def.FunctionContainers))
 			if def.FunctionResource != "" && def.FunctionResource[0] == '/' {
 				def.FunctionResource = def.FunctionResource[1:]
 			}
@@ -73,7 +70,7 @@ func main() {
 			err = r.Add(def.FunctionResource, def.FunctionContainers)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				log.Printf("failed to add function: %v", err)
+				logger.Error("failed to add function", zap.Error(err))
 				return
 			}
 
@@ -89,12 +86,11 @@ func main() {
 			err := json.NewDecoder(req.Body).Decode(&def)
 			if err != nil {
 				w.WriteHeader(http.StatusBadRequest)
-				log.Printf("failed to decode request: %v", err)
+				logger.Error("failed to decode request", zap.Error(err))
 				return
 			}
 
-			log.Printf("deleting function: %s", def.FunctionResource)
-
+			logger.Info("deleting function", zap.String("name", def.FunctionResource))
 			if def.FunctionResource != "" && def.FunctionResource[0] == '/' {
 				def.FunctionResource = def.FunctionResource[1:]
 			}
@@ -102,7 +98,7 @@ func main() {
 			err = r.Del(def.FunctionResource)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				log.Printf("failed to delete function: %v", err)
+				logger.Error("failed to delete function", zap.Error(err))
 				return
 			}
 
@@ -118,11 +114,11 @@ func main() {
 			err := json.NewDecoder(req.Body).Decode(&def)
 			if err != nil {
 				w.WriteHeader(http.StatusBadRequest)
-				log.Printf("failed to decode request: %v", err)
+				logger.Error("failed to decode request", zap.Error(err))
 				return
 			}
 
-			log.Printf("clearing function ips: %s", def.FunctionResource)
+			logger.Info("clearing function ips", zap.String("name", def.FunctionResource))
 
 			if def.FunctionResource != "" && def.FunctionResource[0] == '/' {
 				def.FunctionResource = def.FunctionResource[1:]
@@ -131,7 +127,7 @@ func main() {
 			err = r.Update(def.FunctionResource)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				log.Printf("failed to delete function: %v", err)
+				logger.Error("failed to delete function", zap.Error(err))
 				return
 			}
 
@@ -165,13 +161,13 @@ func main() {
 			sourceIP = util.ExtractIP(req.RemoteAddr)
 		}
 
-		log.Printf("Request IP: %s", sourceIP)
-		log.Printf("invoking function: %s (async: %v)", functionName, async)
+		logger.Debug("incoming request", zap.String("ip", sourceIP))
+		logger.Info("invoking function", zap.String("name", functionName), zap.Bool("async", async))
 
 		req_body, err := io.ReadAll(req.Body)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			log.Print(err)
+			logger.Error("failed to read request body", zap.Error(err))
 			return
 		}
 
@@ -201,15 +197,15 @@ func main() {
 
 	// start server in goroutine
 	go func() {
-		log.Println("rproxy server started on", listenAddr)
+		logger.Info("rproxy server started", zap.String("address", listenAddr))
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("server error: %s", err)
+			logger.Fatal("server error", zap.Error(err))
 		}
 	}()
 
 	// wait for shutdown signal
 	<-sigChan
-	log.Printf("received shutdown signal, initiating graceful shutdown...")
+	logger.Info("received shutdown signal, initiating graceful shutdown...")
 
 	// create context with timeout for graceful shutdown
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -217,8 +213,8 @@ func main() {
 
 	// gracefully shutdown server
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("server shutdown error: %v", err)
+		logger.Error("server shutdown error", zap.Error(err))
 	}
 
-	log.Printf("shutdown complete, exiting")
+	logger.Info("shutdown complete, exiting")
 }

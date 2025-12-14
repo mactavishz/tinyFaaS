@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path"
@@ -16,6 +15,7 @@ import (
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 	"github.com/google/uuid"
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
+	"go.uber.org/zap"
 )
 
 var (
@@ -38,6 +38,7 @@ type ManagementService struct {
 	rproxyAddr            string
 	rproxyPort            int
 	autoscaler            *autoscaler.AutoScaler
+	logger                *zap.Logger
 }
 
 type Backend interface {
@@ -56,7 +57,7 @@ type Handler interface {
 	GetLabels() map[string]string
 }
 
-func New(id string, rproxyAddr string, rproxyPort int, tfBackend Backend) *ManagementService {
+func New(id string, rproxyAddr string, rproxyPort int, tfBackend Backend, logger *zap.Logger) *ManagementService {
 
 	ms := &ManagementService{
 		id:               id,
@@ -64,6 +65,7 @@ func New(id string, rproxyAddr string, rproxyPort int, tfBackend Backend) *Manag
 		functionHandlers: make(map[string]Handler),
 		rproxyAddr:       rproxyAddr,
 		rproxyPort:       rproxyPort,
+		logger:           logger,
 	}
 
 	return ms
@@ -82,7 +84,7 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 		return "", err
 	}
 
-	log.Println("creating function", name, "with uuid", uuid.String())
+	ms.logger.Info("creating function", zap.String("name", name), zap.String("uuid", uuid.String()))
 
 	// create a new function handler
 
@@ -94,7 +96,7 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 		return "", err
 	}
 
-	log.Println("created folder", p)
+	ms.logger.Info("created folder", zap.String("path", p))
 
 	// write zip to file
 	zipPath := path.Join(TmpDir, uuid.String()+".zip")
@@ -114,16 +116,15 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 		// remove folder
 		err = os.RemoveAll(p)
 		if err != nil {
-			log.Println("error removing folder", p, err)
+			ms.logger.Error("error removing folder", zap.String("path", p), zap.Error(err))
 		}
 
 		err = os.Remove(zipPath)
 		if err != nil {
-			log.Println("error removing zip", zipPath, err)
+			ms.logger.Error("error removing zip", zap.String("path", zipPath), zap.Error(err))
 		}
 
-		log.Println("removed folder", p)
-		log.Println("removed zip", zipPath)
+		ms.logger.Info("cleanup completed", zap.String("path", p), zap.String("zipPath", zipPath))
 	}()
 
 	if subfolderPath != "" {
@@ -167,7 +168,7 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 		return "", err
 	}
 
-	log.Println("telling rproxy about new function", name, "with ips", fh.IPs(), ":", d)
+	ms.logger.Info("notify rproxy", zap.String("function", name), zap.Strings("ips", fh.IPs()))
 
 	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://%s:%d/config", ms.rproxyAddr, ms.rproxyPort), bytes.NewBuffer(b))
 	if err != nil {
@@ -177,22 +178,22 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil && !errors.Is(err, io.EOF) {
-		log.Println("error telling rproxy about new function", name, err)
+		ms.logger.Error("error notifying rproxy", zap.String("function", name), zap.Error(err))
 		return "", err
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("rproxy returned status code %d", resp.StatusCode)
-	}
-
 	defer resp.Body.Close()
 
 	r, err := io.ReadAll(resp.Body)
 	if err != nil {
+		ms.logger.Error("error reading rproxy response", zap.String("function", name), zap.Error(err))
 		return "", err
 	}
 
-	log.Println("rproxy response:", string(r))
+	ms.logger.Info("rproxy response", zap.String("response", string(r)))
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to notify rproxy, status code %d", resp.StatusCode)
+	}
 
 	ms.functionHandlersMutex.Lock()
 	ms.functionHandlers[name] = fh
@@ -218,10 +219,11 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 func (ms *ManagementService) Logs() (io.Reader, error) {
 
 	var logs bytes.Buffer
-
+	ms.logger.Info("collecting logs from all functions")
 	for name := range ms.functionHandlers {
 		l, err := ms.LogsFunction(name)
 		if err != nil {
+			ms.logger.Error("error getting logs for function", zap.String("function", name), zap.Error(err))
 			return nil, err
 		}
 
@@ -247,6 +249,7 @@ func (ms *ManagementService) LogsFunction(name string) (io.Reader, error) {
 }
 
 func (ms *ManagementService) List() []string {
+	ms.logger.Info("listing functions")
 	list := make([]string, 0, len(ms.functionHandlers))
 	for name := range ms.functionHandlers {
 		list = append(list, name)
@@ -256,8 +259,9 @@ func (ms *ManagementService) List() []string {
 }
 
 func (ms *ManagementService) Wipe() error {
+	ms.logger.Info("wiping all functions")
 	for name := range ms.functionHandlers {
-		log.Println("destroying function", name)
+		ms.logger.Info("destroying function", zap.String("function", name))
 		ms.Delete(name)
 	}
 
@@ -265,13 +269,12 @@ func (ms *ManagementService) Wipe() error {
 }
 
 func (ms *ManagementService) Delete(name string) error {
-
 	fh, ok := ms.functionHandlers[name]
 	if !ok {
 		return fmt.Errorf("function %s not found", name)
 	}
 
-	log.Println("destroying function", name)
+	ms.logger.Info("deleting function", zap.String("function", name))
 
 	ms.functionHandlersMutex.Lock()
 	defer ms.functionHandlersMutex.Unlock()
@@ -293,24 +296,17 @@ func (ms *ManagementService) Delete(name string) error {
 		return err
 	}
 
-	log.Println("telling rproxy to delete function", name)
-
+	ms.logger.Info("notify rproxy", zap.String("function", name))
 	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://%s:%d/config", ms.rproxyAddr, ms.rproxyPort), bytes.NewBuffer(b))
 	if err != nil {
 		return err
 	}
+
 	req.Header.Set("Content-Type", "application/json")
-
 	resp, err := http.DefaultClient.Do(req)
-
 	if err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("rproxy returned status code %d", resp.StatusCode)
-	}
-
 	defer resp.Body.Close()
 
 	r, err := io.ReadAll(resp.Body)
@@ -318,9 +314,13 @@ func (ms *ManagementService) Delete(name string) error {
 		return err
 	}
 
-	log.Println("rproxy response:", string(r))
+	ms.logger.Info("rproxy response", zap.String("response", string(r)))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("rproxy returned status code %d", resp.StatusCode)
+	}
 
 	delete(ms.functionHandlers, name)
+	ms.logger.Info("function deleted", zap.String("function", name))
 
 	// Unregister from autoscaler
 	if ms.autoscaler != nil {
@@ -335,7 +335,7 @@ func (ms *ManagementService) Upload(name string, env string, threads int, zipped
 	// b64 decode zip
 	zip, err := base64.StdEncoding.DecodeString(zipped)
 	if err != nil {
-		log.Println(err)
+		ms.logger.Error("error decoding base64 zip", zap.Error(err))
 		return "", err
 	}
 
@@ -343,14 +343,11 @@ func (ms *ManagementService) Upload(name string, env string, threads int, zipped
 	n, err := ms.createFunction(name, env, threads, zip, "", envs, labels)
 
 	if err != nil {
-		log.Println(err)
+		ms.logger.Error("error creating function", zap.String("function", name), zap.Error(err))
 		return "", err
 	}
 
-	// return success
-	// w.WriteHeader(http.StatusOK)
 	r := fmt.Sprintf("Function %s deployed", n)
-
 	return r, nil
 }
 
@@ -360,16 +357,17 @@ func (ms *ManagementService) UrlUpload(name string, env string, threads int, fun
 	resp, err := http.Get(funcurl)
 	if err != nil {
 		// w.WriteHeader(http.StatusBadRequest)
-		log.Println(err)
+		ms.logger.Error("error downloading function zip", zap.String("url", funcurl), zap.Error(err))
 		return "", err
 	}
+	defer resp.Body.Close()
 
 	// reading body to memory
 	// not the smartest thing
 	zip, err := io.ReadAll(resp.Body)
 
 	if err != nil {
-		log.Println(err)
+		ms.logger.Error("error reading function zip", zap.String("url", funcurl), zap.Error(err))
 		return "", err
 	}
 
@@ -377,7 +375,7 @@ func (ms *ManagementService) UrlUpload(name string, env string, threads int, fun
 	n, err := ms.createFunction(name, env, threads, zip, subfolder, envs, labels)
 
 	if err != nil {
-		log.Println(err)
+		ms.logger.Error("error creating function", zap.String("function", name), zap.Error(err))
 		return "", err
 	}
 

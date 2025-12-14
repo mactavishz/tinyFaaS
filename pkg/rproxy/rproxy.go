@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"math/rand"
 	"net/http"
 	"regexp"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	retry "github.com/avast/retry-go/v5"
+	"go.uber.org/zap"
 )
 
 type Route struct {
@@ -24,11 +24,13 @@ type RProxy struct {
 	routingTable      map[string]*Route
 	routingTableMux   sync.RWMutex
 	autoscalerEnabled bool
+	logger            *zap.Logger
 }
 
-func New() *RProxy {
+func New(logger *zap.Logger) *RProxy {
 	return &RProxy{
 		routingTable: make(map[string]*Route),
+		logger:       logger,
 	}
 }
 
@@ -41,6 +43,7 @@ func (r *RProxy) Add(name string, ips []string) error {
 		return fmt.Errorf("no ips given")
 	}
 
+	r.logger.Debug("adding function route", zap.String("name", name), zap.Strings("ips", ips))
 	r.routingTableMux.Lock()
 	defer r.routingTableMux.Unlock()
 
@@ -59,6 +62,7 @@ func (r *RProxy) Del(name string) error {
 		return fmt.Errorf("function not found")
 	}
 
+	r.logger.Debug("deleting function route", zap.String("name", name))
 	delete(r.routingTable, name)
 	return nil
 }
@@ -68,6 +72,7 @@ func (r *RProxy) Update(name string) error {
 	defer r.routingTableMux.Unlock()
 
 	if _, ok := r.routingTable[name]; ok {
+		r.logger.Debug("updating function route", zap.String("name", name))
 		r.routingTable[name].isActive = !r.routingTable[name].isActive
 	}
 	return nil
@@ -79,20 +84,19 @@ func (r *RProxy) Call(name string, payload []byte, async bool, headers map[strin
 	r.routingTableMux.RUnlock()
 
 	if !ok {
-		log.Printf("function not found: %s", name)
+		r.logger.Error("function not found", zap.String("name", name))
 		return http.StatusNotFound, nil
 	}
 
-	log.Printf("have function route, ips: %s, active: %v", route.ips, route.isActive)
-
+	r.logger.Debug("found function route", zap.Strings("ips", route.ips), zap.Bool("active", route.isActive))
 	// Check if function is scaled down and trigger cold start if needed
 	if r.autoscalerEnabled && !route.isActive {
-		log.Printf("function %s is scaled down, triggering cold start", name)
+		r.logger.Info("function is scaled down, triggering cold start", zap.String("name", name))
 		if err := r.triggerColdStart(name); err != nil {
-			log.Printf("failed to trigger cold start for %s: %v", name, err)
+			r.logger.Error("failed to trigger cold start", zap.String("name", name), zap.Error(err))
 			return http.StatusInternalServerError, nil
 		}
-		log.Printf("cold start completed for %s", name)
+		r.logger.Info("cold start completed", zap.String("name", name))
 	}
 
 	go r.heartbeat(name)
@@ -100,11 +104,10 @@ func (r *RProxy) Call(name string, payload []byte, async bool, headers map[strin
 	// choose random handler
 	ip := route.ips[rand.Intn(len(route.ips))]
 
-	log.Printf("chosen function ip: %s", ip)
-
+	r.logger.Debug("chosen function ip", zap.String("ip", ip))
 	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8000/fn", ip), bytes.NewBuffer(payload))
 	if err != nil {
-		log.Print(err)
+		r.logger.Error("failed to create request", zap.Error(err))
 		return http.StatusInternalServerError, nil
 	}
 	for k, v := range headers {
@@ -127,7 +130,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, headers map[strin
 	// call function and return results
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Print(err)
+		r.logger.Error("failed to invoke function", zap.Error(err))
 		return http.StatusInternalServerError, nil
 	}
 
@@ -135,7 +138,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, headers map[strin
 	res_body, err := io.ReadAll(resp.Body)
 
 	if err != nil {
-		log.Print(err)
+		r.logger.Error("failed to read response body", zap.Error(err))
 		return http.StatusInternalServerError, nil
 	}
 
@@ -167,7 +170,7 @@ func (r *RProxy) heartbeat(name string) error {
 		retry.Attempts(3),
 		retry.Delay(100*time.Millisecond),
 		retry.OnRetry(func(attempt uint, err error) {
-			log.Printf("heartbeat attempt %d for %s failed: %v", attempt, name, err)
+			r.logger.Debug("heartbeat attempt failed", zap.Uint("attempt", attempt), zap.String("name", name), zap.Error(err))
 		}),
 	).Do(
 		func() error {
@@ -188,13 +191,13 @@ func (r *RProxy) heartbeat(name string) error {
 				return err
 			}
 
-			log.Printf("successfully triggered heartbeat for %s", name)
+			r.logger.Info("successfully triggered heartbeat", zap.String("name", name))
 			return nil
 		},
 	)
 
 	if err != nil {
-		log.Printf("failed to trigger heartbeat for %s: %v", name, err)
+		r.logger.Error("failed to trigger heartbeat", zap.String("name", name), zap.Error(err))
 		return err
 	}
 	return nil
@@ -219,7 +222,7 @@ func (r *RProxy) triggerColdStart(name string) error {
 		retry.Attempts(5),
 		retry.Delay(100*time.Millisecond),
 		retry.OnRetry(func(attempt uint, err error) {
-			log.Printf("cold start attempt %d for %s failed: %v", attempt, name, err)
+			r.logger.Debug("cold start attempt failed", zap.Uint("attempt", attempt), zap.String("name", name), zap.Error(err))
 		}),
 	).Do(
 		func() error {
@@ -240,12 +243,12 @@ func (r *RProxy) triggerColdStart(name string) error {
 				return err
 			}
 
-			log.Printf("successfully triggered cold start for %s", name)
+			r.logger.Info("successfully triggered cold start", zap.String("name", name))
 			return nil
 		},
 	)
 	if err != nil {
-		log.Printf("failed to trigger cold start for %s: %v", name, err)
+		r.logger.Error("failed to trigger cold start", zap.String("name", name), zap.Error(err))
 	}
 	return nil
 }
