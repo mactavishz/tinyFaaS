@@ -8,4 +8,7 @@ then
     exit
 fi
 
-curl localhost:8080/logs
+GATEWAY_HOST=${GATEWAY_HOST:-localhost}
+GATEWAY_PORT=${GATEWAY_PORT:-80}
+
+curl -X GET http://${GATEWAY_HOST}:${GATEWAY_PORT}/system/logs?name=$1
