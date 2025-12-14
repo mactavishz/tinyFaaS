@@ -61,8 +61,9 @@ start: build
 	@echo "  ./tf-manager-$(OS)-$(ARCH)"
 
 .PHONY: test
-test: ${TEST_DIR}/test_all.py
-	@python3 ${TEST_DIR}/test_all.py
+test:
+	@echo "Running integration tests..."
+	go test -v -timeout 5m ./test
 
 .PHONY: clean
 clean:
