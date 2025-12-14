@@ -182,7 +182,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 		d.FunctionLabels = make(map[string]string)
 	}
 
-	res, err := s.ms.Upload(d.FunctionName, d.FunctionEnv, d.FunctionThreads, d.FunctionZip, envs, d.FunctionLabels)
+	err = s.ms.Upload(d.FunctionName, d.FunctionEnv, d.FunctionThreads, d.FunctionZip, envs, d.FunctionLabels)
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -192,7 +192,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	// return success
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, res)
+	fmt.Fprintf(w, "Function %s deployed\n", d.FunctionName)
 
 }
 
@@ -227,6 +227,7 @@ func (s *server) deleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	// return success
 	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Function %s deleted\n", d.FunctionName)
 }
 
 func (s *server) listHandler(w http.ResponseWriter, r *http.Request) {
@@ -261,6 +262,7 @@ func (s *server) wipeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, "All functions deleted\n")
 }
 
 func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
@@ -347,7 +349,7 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 		d.FunctionLabels = make(map[string]string)
 	}
 
-	res, err := s.ms.UrlUpload(d.FunctionName, d.FunctionEnv, d.FunctionThreads, d.FunctionURL, d.SubFolder, envs, d.FunctionLabels)
+	err = s.ms.UrlUpload(d.FunctionName, d.FunctionEnv, d.FunctionThreads, d.FunctionURL, d.SubFolder, envs, d.FunctionLabels)
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -357,7 +359,7 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	// return success
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, res)
+	fmt.Fprintf(w, "Function %s deployed\n", d.FunctionName)
 }
 
 func (s *server) scaleUpHandler(w http.ResponseWriter, r *http.Request) {
@@ -392,6 +394,7 @@ func (s *server) scaleUpHandler(w http.ResponseWriter, r *http.Request) {
 
 	// return success
 	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Function %s scaled up\n", d.FunctionName)
 	s.logger.Info("function scaled up successfully", zap.String("name", d.FunctionName))
 }
 
@@ -426,5 +429,6 @@ func (s *server) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
 
 	// return success
 	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Heartbeat for function %s recorded\n", d.FunctionName)
 	s.logger.Info("heartbeat recorded successfully", zap.String("name", d.FunctionName))
 }

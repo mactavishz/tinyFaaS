@@ -71,17 +71,17 @@ func New(id string, rproxyAddr string, rproxyPort int, tfBackend Backend, logger
 	return ms
 }
 
-func (ms *ManagementService) createFunction(name string, env string, threads int, funczip []byte, subfolderPath string, envs map[string]string, labels map[string]string) (string, error) {
+func (ms *ManagementService) createFunction(name string, env string, threads int, funczip []byte, subfolderPath string, envs map[string]string, labels map[string]string) error {
 
 	// validate function name according to RFC 1035 DNS label rules
 	if !util.IsValidFunctionName(name) {
-		return "", fmt.Errorf("function name %s is not valid (must be 1-63 lowercase alphanumeric characters or hyphens, cannot start or end with hyphen)", name)
+		return fmt.Errorf("function name %s is not valid (must be 1-63 lowercase alphanumeric characters or hyphens, cannot start or end with hyphen)", name)
 	}
 
 	// make a uuidv4 for the function
 	uuid, err := uuid.NewRandom()
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	ms.logger.Info("creating function", zap.String("name", name), zap.String("uuid", uuid.String()))
@@ -93,7 +93,7 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	err = os.MkdirAll(p, 0777)
 
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	ms.logger.Info("created folder", zap.String("path", p))
@@ -103,13 +103,13 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	err = os.WriteFile(zipPath, funczip, 0777)
 
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	err = util.Unzip(zipPath, p)
 
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	defer func() {
@@ -143,14 +143,14 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	fh, err := ms.backend.Create(name, env, threads, p, envs, labels)
 
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	err = fh.Start()
 
 	if err != nil {
 		// container did not start properly...
-		return "", err
+		return err
 	}
 
 	// tell rproxy about the new function
@@ -165,34 +165,34 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 
 	b, err := json.Marshal(d)
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	ms.logger.Info("notify rproxy", zap.String("function", name), zap.Strings("ips", fh.IPs()))
 
 	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://%s:%d/config", ms.rproxyAddr, ms.rproxyPort), bytes.NewBuffer(b))
 	if err != nil {
-		return "", err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil && !errors.Is(err, io.EOF) {
 		ms.logger.Error("error notifying rproxy", zap.String("function", name), zap.Error(err))
-		return "", err
+		return err
 	}
 	defer resp.Body.Close()
 
 	r, err := io.ReadAll(resp.Body)
 	if err != nil {
 		ms.logger.Error("error reading rproxy response", zap.String("function", name), zap.Error(err))
-		return "", err
+		return err
 	}
 
 	ms.logger.Info("rproxy response", zap.String("response", string(r)))
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to notify rproxy, status code %d", resp.StatusCode)
+		return fmt.Errorf("failed to notify rproxy, status code %d", resp.StatusCode)
 	}
 
 	ms.functionHandlersMutex.Lock()
@@ -209,11 +209,11 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	if oldHandler != nil {
 		err = oldHandler.Destroy()
 		if err != nil {
-			return "", err
+			return err
 		}
 	}
 
-	return name, nil
+	return nil
 }
 
 func (ms *ManagementService) Logs() (io.Reader, error) {
@@ -330,35 +330,34 @@ func (ms *ManagementService) Delete(name string) error {
 	return nil
 }
 
-func (ms *ManagementService) Upload(name string, env string, threads int, zipped string, envs map[string]string, labels map[string]string) (string, error) {
+func (ms *ManagementService) Upload(name string, env string, threads int, zipped string, envs map[string]string, labels map[string]string) error {
 
 	// b64 decode zip
 	zip, err := base64.StdEncoding.DecodeString(zipped)
 	if err != nil {
 		ms.logger.Error("error decoding base64 zip", zap.Error(err))
-		return "", err
+		return err
 	}
 
 	// create function handler
-	n, err := ms.createFunction(name, env, threads, zip, "", envs, labels)
+	err = ms.createFunction(name, env, threads, zip, "", envs, labels)
 
 	if err != nil {
 		ms.logger.Error("error creating function", zap.String("function", name), zap.Error(err))
-		return "", err
+		return err
 	}
 
-	r := fmt.Sprintf("Function %s deployed", n)
-	return r, nil
+	return nil
 }
 
-func (ms *ManagementService) UrlUpload(name string, env string, threads int, funcurl string, subfolder string, envs map[string]string, labels map[string]string) (string, error) {
+func (ms *ManagementService) UrlUpload(name string, env string, threads int, funcurl string, subfolder string, envs map[string]string, labels map[string]string) error {
 
 	// download url
 	resp, err := http.Get(funcurl)
 	if err != nil {
 		// w.WriteHeader(http.StatusBadRequest)
 		ms.logger.Error("error downloading function zip", zap.String("url", funcurl), zap.Error(err))
-		return "", err
+		return err
 	}
 	defer resp.Body.Close()
 
@@ -368,20 +367,18 @@ func (ms *ManagementService) UrlUpload(name string, env string, threads int, fun
 
 	if err != nil {
 		ms.logger.Error("error reading function zip", zap.String("url", funcurl), zap.Error(err))
-		return "", err
+		return err
 	}
 
 	// create function handler
-	n, err := ms.createFunction(name, env, threads, zip, subfolder, envs, labels)
+	err = ms.createFunction(name, env, threads, zip, subfolder, envs, labels)
 
 	if err != nil {
 		ms.logger.Error("error creating function", zap.String("function", name), zap.Error(err))
-		return "", err
+		return err
 	}
 
-	// return success
-	r := fmt.Sprintf("Function %s deployed", n)
-	return r, nil
+	return nil
 }
 
 func (ms *ManagementService) Stop() error {
