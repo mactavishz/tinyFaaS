@@ -641,7 +641,7 @@ func (dh *dockerHandler) Logs() (io.Reader, error) {
 			if i > 0 {
 				logs.WriteString("\n")
 			}
-			logs.WriteString(fmt.Sprintf("==================== Container %d/%d: %s ====================\n", i+1, len(dh.containers), c))
+			logs.WriteString(fmt.Sprintf("====================> Container %d/%d: %s \n", i+1, len(dh.containers), c))
 		}
 
 		l, err := dh.getContainerLogs(c)
@@ -652,7 +652,7 @@ func (dh *dockerHandler) Logs() (io.Reader, error) {
 		logs.WriteString(l)
 
 		if len(dh.containers) > 1 {
-			logs.WriteString(fmt.Sprintf("==================== End of Container %d/%d ====================\n", i+1, len(dh.containers)))
+			logs.WriteString(fmt.Sprintf("====================> End of Container %d/%d \n", i+1, len(dh.containers)))
 		}
 	}
 

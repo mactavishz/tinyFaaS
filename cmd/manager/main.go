@@ -145,6 +145,7 @@ func main() {
 func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "invalid method, only POST allowed\n")
 		return
 	}
 
@@ -161,6 +162,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&d)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "failed to decode upload request\n")
 		s.logger.Error("failed to decode upload request", zap.Error(err))
 		return
 	}
@@ -186,6 +188,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "failed to upload function\n")
 		s.logger.Error("failed to upload function", zap.Error(err))
 		return
 	}
@@ -199,6 +202,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 func (s *server) deleteHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "invalid method, only POST allowed\n")
 		return
 	}
 
@@ -210,6 +214,7 @@ func (s *server) deleteHandler(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&d)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "failed to decode delete request\n")
 		s.logger.Error("failed to decode delete request", zap.Error(err))
 		return
 	}
@@ -221,6 +226,7 @@ func (s *server) deleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "failed to delete function\n")
 		s.logger.Error("failed to delete function", zap.String("name", d.FunctionName), zap.Error(err))
 		return
 	}
@@ -233,6 +239,7 @@ func (s *server) deleteHandler(w http.ResponseWriter, r *http.Request) {
 func (s *server) listHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "invalid method, only GET allowed\n")
 		return
 	}
 
@@ -249,6 +256,7 @@ func (s *server) listHandler(w http.ResponseWriter, r *http.Request) {
 func (s *server) wipeHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "invalid method, only POST allowed\n")
 		return
 	}
 
@@ -257,6 +265,7 @@ func (s *server) wipeHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "failed to wipe functions\n")
 		s.logger.Error("failed to wipe functions", zap.Error(err))
 		return
 	}
@@ -268,6 +277,7 @@ func (s *server) wipeHandler(w http.ResponseWriter, r *http.Request) {
 func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "invalid method, only GET allowed\n")
 		return
 	}
 
@@ -280,6 +290,7 @@ func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
 		l, err := s.ms.Logs()
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "failed to get logs\n")
 			s.logger.Error("failed to get logs", zap.Error(err))
 			return
 		}
@@ -290,6 +301,7 @@ func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
 		l, err := s.ms.LogsFunction(name)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "failed to get logs for function %s\n", name)
 			s.logger.Error("failed to get logs for function", zap.String("name", name), zap.Error(err))
 			return
 		}
@@ -302,6 +314,7 @@ func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
 	_, err := io.Copy(w, logs)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "failed to write logs to response\n")
 		s.logger.Error("failed to write logs to response", zap.Error(err))
 		return
 	}
@@ -310,6 +323,7 @@ func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
 func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "invalid method, only POST allowed\n")
 		return
 	}
 
@@ -327,6 +341,7 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&d)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "failed to decode url upload request\n")
 		s.logger.Error("failed to decode url upload request", zap.Error(err))
 		return
 	}
@@ -353,6 +368,7 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "failed to upload function from url\n")
 		s.logger.Error("failed to upload function from url", zap.Error(err))
 		return
 	}
@@ -365,6 +381,7 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 func (s *server) scaleUpHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "invalid method, only POST allowed\n")
 		return
 	}
 
@@ -376,7 +393,7 @@ func (s *server) scaleUpHandler(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&d)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(err.Error()))
+		fmt.Fprintf(w, "failed to decode scale up request\n")
 		s.logger.Error("failed to decode scale up request", zap.Error(err))
 		return
 	}
@@ -387,7 +404,7 @@ func (s *server) scaleUpHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(err.Error()))
+		fmt.Fprintf(w, "failed to scale up function\n")
 		s.logger.Error("failed to scale up function", zap.String("name", d.FunctionName), zap.Error(err))
 		return
 	}
@@ -401,6 +418,7 @@ func (s *server) scaleUpHandler(w http.ResponseWriter, r *http.Request) {
 func (s *server) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "invalid method, only POST allowed\n")
 		return
 	}
 
@@ -412,6 +430,7 @@ func (s *server) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&d)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "failed to decode heartbeat request\n")
 		s.logger.Error("failed to decode heartbeat request", zap.Error(err))
 		return
 	}
@@ -423,6 +442,7 @@ func (s *server) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "failed to record heartbeat\n")
 		s.logger.Error("failed to record heartbeat", zap.String("name", d.FunctionName), zap.Error(err))
 		return
 	}
