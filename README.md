@@ -131,12 +131,7 @@ By default, tinyFaaS will use the following ports:
 | Port | Protocol | Description        |
 | ---- | -------- | ------------------ |
 | 8080 | TCP      | Management Service |
-| 8081 | TCP      | Reverse Proxy      |
-| 8000 | TCP      | HTTP Endpoint      |
-
-To change the port of the management service, change the port binding in the `docker run` command.
-
-To change or deactivate the endpoints of tinyFaaS, you can use the `HTTP_PORT` environment variables, which must be passed to the management service Docker container.
+| 8000 | TCP      | Reverse Proxy      |
 
 ### Tests
 
@@ -144,34 +139,17 @@ The tests in [`./test`](./test) test the end-to-end functionality of tinyFaaS an
 We use these tests during development to ensure no patches break any functionality.
 The tests can also serve as documentation on the expected behavior of tinyFaaS.
 
-Running the tests requires:
-
-- Python >3.10 with the `venv` module
-- a tinyFaaS binary built for your host
-
-Create a virtual environment for Python and install the necessary dependencies for CoAP and gRPC:
-
-```sh
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r test/requirements.txt
-```
+Before running the tests, make sure tinyFaaS is already running.
 
 If you do not install these requirements, test runs are limited to invocations with HTTP.
 
 Run the tests with:
 
 ```sh
-$ make test
-.............
-----------------------------------------------------------------------
-Ran 13 tests in 28.063s
-
-OK
+make test
 ```
 
-Tests will output a `.` (dot) for successful tests and `E` or `F` for failed tests.
-tinyFaaS output will be written to `tf_test.out`.
+## Known Issues
 
 On macOS, [`docker-mac-net-connect`](https://github.com/chipmk/docker-mac-net-connect) is necessary to run tinyFaaS.
 There is a [known issue in `docker-mac-net-connect`](https://github.com/chipmk/docker-mac-net-connect/issues/36) that silently breaks the tunnel when Docker Desktop enters its resource saver mode.
