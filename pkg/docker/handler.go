@@ -50,6 +50,8 @@ type dockerHandler struct {
 	isRunning   bool              // track if containers are running
 	opMux       sync.Mutex        // mutex for start/stop/restart operations
 	labels      map[string]string // store container labels
+	envVars     []string          // store environment variables for container recreation
+	extraHosts  []string          // store extra hosts for container recreation
 	logger      *zap.Logger
 }
 
@@ -277,6 +279,10 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 		containerLabels[k] = v
 	}
 
+	// Store config for later container recreation (scale-up)
+	dh.envVars = e
+	dh.extraHosts = extraHosts
+
 	// create containers
 	// docker run -d --network <network> --name <container> <image>
 	for i := 0; i < dh.threads; i++ {
@@ -499,7 +505,7 @@ func (dh *dockerHandler) Start() error {
 	return nil
 }
 
-// stopContainers stops all function containers (used by both Stop and cleanup)
+// stopContainers stops all function containers (used by cleanup during startup failures)
 func (dh *dockerHandler) stopContainers() {
 	wg := sync.WaitGroup{}
 	for _, c := range dh.containers {
@@ -519,6 +525,48 @@ func (dh *dockerHandler) stopContainers() {
 				dh.logger.Error("error stopping container", zap.String("containerID", containerID), zap.Error(err))
 			} else {
 				dh.logger.Info("stopped container", zap.String("containerID", containerID))
+			}
+		}(c)
+	}
+	wg.Wait()
+	dh.handlerIPs = nil
+	dh.isRunning = false
+}
+
+// deleteContainers stops and removes all function containers (used by scale-to-zero)
+// This frees up system resources by completely removing the containers
+func (dh *dockerHandler) deleteContainers() {
+	wg := sync.WaitGroup{}
+	for _, c := range dh.containers {
+		wg.Add(1)
+		go func(containerID string) {
+			defer wg.Done()
+
+			// Stop container first
+			timeout := 5
+			err := dh.client.ContainerStop(
+				context.Background(),
+				containerID,
+				container.StopOptions{
+					Timeout: &timeout,
+				},
+			)
+			if err != nil {
+				dh.logger.Error("error stopping container", zap.String("containerID", containerID), zap.Error(err))
+			} else {
+				dh.logger.Info("stopped container", zap.String("containerID", containerID))
+			}
+
+			// Remove container
+			err = dh.client.ContainerRemove(
+				context.Background(),
+				containerID,
+				container.RemoveOptions{},
+			)
+			if err != nil {
+				dh.logger.Error("error removing container", zap.String("containerID", containerID), zap.Error(err))
+			} else {
+				dh.logger.Info("removed container", zap.String("containerID", containerID))
 			}
 		}(c)
 	}
@@ -659,7 +707,8 @@ func (dh *dockerHandler) Logs() (io.Reader, error) {
 	return &logs, nil
 }
 
-// Stop stops the function containers without destroying them (for scale-to-zero)
+// Stop stops and deletes the function containers (for scale-to-zero)
+// Containers are removed to free up system resources, and will be recreated on scale-up
 func (dh *dockerHandler) Stop() error {
 	dh.opMux.Lock()
 	defer dh.opMux.Unlock()
@@ -669,13 +718,13 @@ func (dh *dockerHandler) Stop() error {
 		return nil
 	}
 
-	dh.logger.Info("stopping function containers", zap.String("name", dh.name))
-	dh.stopContainers()
-	dh.logger.Info("function scaled down", zap.String("name", dh.name))
+	dh.logger.Info("stopping and deleting function containers", zap.String("name", dh.name))
+	dh.deleteContainers()
+	dh.logger.Info("function scaled down (containers deleted)", zap.String("name", dh.name))
 	return nil
 }
 
-// Restart restarts previously stopped function containers (for scale-up from scale-to-zero)
+// Restart recreates and starts function containers from cached image (for scale-up from scale-to-zero)
 func (dh *dockerHandler) Restart() error {
 	dh.opMux.Lock()
 	defer dh.opMux.Unlock()
@@ -685,23 +734,53 @@ func (dh *dockerHandler) Restart() error {
 		return nil
 	}
 
-	dh.logger.Info("restarting function containers", zap.String("name", dh.name))
+	dh.logger.Info("recreating function containers from cached image", zap.String("name", dh.name), zap.String("image", dh.uniqueName))
+
+	// Clear old container IDs since we're creating new containers
+	dh.containers = make([]string, 0, dh.threads)
+
+	// Recreate containers from cached image
+	for i := 0; i < dh.threads; i++ {
+		containerResp, err := dh.client.ContainerCreate(
+			context.Background(),
+			&container.Config{
+				Image:  dh.uniqueName,
+				Labels: dh.labels,
+				Env:    dh.envVars,
+			},
+			&container.HostConfig{
+				NetworkMode: container.NetworkMode(dh.networkName),
+				ExtraHosts:  dh.extraHosts,
+			},
+			nil,
+			nil,
+			dh.uniqueName+fmt.Sprintf("-%d", i),
+		)
+
+		if err != nil {
+			return fmt.Errorf("failed to create container %d: %w", i, err)
+		}
+
+		dh.logger.Info("created new container", zap.String("containerID", containerResp.ID), zap.Int("index", i))
+		dh.containers = append(dh.containers, containerResp.ID)
+	}
+
 	// Start all containers
 	wg := sync.WaitGroup{}
 	for _, c := range dh.containers {
 		wg.Add(1)
-		go func(c string) {
+		go func(containerID string) {
 			defer wg.Done()
 
 			err := dh.client.ContainerStart(
 				context.Background(),
-				c,
+				containerID,
 				container.StartOptions{},
 			)
 			if err != nil {
-				dh.logger.Error("error starting container", zap.String("containerID", c), zap.Error(err))
+				dh.logger.Error("error starting container", zap.String("containerID", containerID), zap.Error(err))
 			} else {
-				dh.logger.Info("restarted container", zap.String("containerID", c))
+				dh.logger.Info("started new container", zap.String("containerID", containerID))
 			}
 		}(c)
 	}
@@ -720,12 +799,12 @@ func (dh *dockerHandler) Restart() error {
 
 		ip := c.NetworkSettings.Networks[dh.networkName].IPAddress
 		dh.handlerIPs = append(dh.handlerIPs, ip)
-		dh.logger.Info("got ip for container", zap.String("ip", ip), zap.String("containerID", containerID))
+		dh.logger.Info("got ip for recreated container", zap.String("ip", ip), zap.String("containerID", containerID))
 	}
 
 	// Wait for containers to be ready
 	for _, ip := range dh.handlerIPs {
-		dh.logger.Info("waiting for container to be ready", zap.String("ip", ip))
+		dh.logger.Info("waiting for recreated container to be ready", zap.String("ip", ip))
 
 		err := retry.New(
 			retry.Attempts(5),
@@ -744,19 +823,19 @@ func (dh *dockerHandler) Restart() error {
 			defer resp.Body.Close()
 
 			if resp.StatusCode == http.StatusOK {
-				dh.logger.Info("container is ready", zap.String("ip", ip))
+				dh.logger.Info("recreated container is ready", zap.String("ip", ip))
 				return nil
 			}
 			return fmt.Errorf("container health endpoint failed with status: %s", resp.Status)
 		})
 
 		if err != nil {
-			return fmt.Errorf("container %s not ready after maximum retries: %w", ip, err)
+			return fmt.Errorf("recreated container %s not ready after maximum retries: %w", ip, err)
 		}
 	}
 
 	dh.isRunning = true
-	dh.logger.Info("function scaled up", zap.String("name", dh.name))
+	dh.logger.Info("function scaled up (new containers created and started)", zap.String("name", dh.name))
 	return nil
 }
 
