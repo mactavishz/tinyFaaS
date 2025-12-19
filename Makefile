@@ -60,6 +60,11 @@ start: build
 	@echo "  ./tf-rproxy-$(OS)-$(ARCH) 127.0.0.1:8081 http:127.0.0.1:8000"
 	@echo "  ./tf-manager-$(OS)-$(ARCH)"
 
+.PHONY: unit-test
+unit-test:
+	@echo "Running unit tests..."
+	go test -v ./pkg/... --cover
+
 .PHONY: test
 test:
 	@echo "Running integration tests..."
