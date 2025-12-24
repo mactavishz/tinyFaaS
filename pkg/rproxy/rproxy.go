@@ -21,16 +21,18 @@ type Route struct {
 }
 
 type RProxy struct {
-	routingTable      map[string]*Route
-	routingTableMux   sync.RWMutex
-	autoscalerEnabled bool
-	logger            *zap.Logger
+	routingTable        map[string]*Route
+	reverseRoutingTable map[string]string
+	routingTableMux     sync.RWMutex
+	autoscalerEnabled   bool
+	logger              *zap.Logger
 }
 
 func New(logger *zap.Logger) *RProxy {
 	return &RProxy{
-		routingTable: make(map[string]*Route),
-		logger:       logger,
+		routingTable:        make(map[string]*Route),
+		reverseRoutingTable: make(map[string]string),
+		logger:              logger,
 	}
 }
 
@@ -51,6 +53,9 @@ func (r *RProxy) Add(name string, ips []string) error {
 		ips:      ips,
 		isActive: true,
 	}
+	for _, ip := range ips {
+		r.reverseRoutingTable[ip] = name
+	}
 	return nil
 }
 
@@ -64,6 +69,9 @@ func (r *RProxy) Del(name string) error {
 
 	r.logger.Debug("deleting function route", zap.String("name", name))
 	delete(r.routingTable, name)
+	for _, ip := range r.routingTable[name].ips {
+		delete(r.reverseRoutingTable, ip)
+	}
 	return nil
 }
 
@@ -143,6 +151,13 @@ func (r *RProxy) Call(name string, payload []byte, async bool, headers map[strin
 	}
 
 	return resp.StatusCode, res_body
+}
+
+func (r *RProxy) GetFunctionNameByIP(ip string) (string, bool) {
+	r.routingTableMux.RLock()
+	defer r.routingTableMux.RUnlock()
+	name, ok := r.reverseRoutingTable[ip]
+	return name, ok
 }
 
 func cleanHeaderKey(key string) string {
