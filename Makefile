@@ -42,13 +42,16 @@ bin-name:
 	@echo "tf-manager-$(OS)-$(ARCH) tf-rproxy-$(OS)-$(ARCH)"
 
 .PHONY: build
-build: tf-manager-${OS}-${ARCH} tf-rproxy-${OS}-${ARCH}
+build: tf-manager-${OS}-${ARCH} tf-rproxy-${OS}-${ARCH} tf-gateway-${OS}-${ARCH}
 
 .PHONY: build-manager
 build-manager: tf-manager-${OS}-${ARCH}
 
 .PHONY: build-rproxy
 build-rproxy: tf-rproxy-${OS}-${ARCH}
+
+.PHONY: build-gateway
+build-gateway: tf-gateway-${OS}-${ARCH}
 
 .PHONY: start
 start: build
@@ -63,12 +66,12 @@ start: build
 .PHONY: unit-test
 unit-test:
 	@echo "Running unit tests..."
-	go test -v ./pkg/... --cover
+	go test -count=1 -v ./pkg/... --cover
 
 .PHONY: test
 test:
 	@echo "Running integration tests..."
-	go test -v -timeout 5m ./test
+	go test -count=1 -v -timeout 5m ./test
 
 .PHONY: clean
 clean:
@@ -118,26 +121,28 @@ install: clean-runtimes build build-runtime-images
 	install -d $(BINDIR)
 	install -m 755 tf-manager-$(OS)-$(ARCH) $(BINDIR)/tf-manager
 	install -m 755 tf-rproxy-$(OS)-$(ARCH) $(BINDIR)/tf-rproxy
+	install -m 755 tf-gateway-$(OS)-$(ARCH) $(BINDIR)/tf-gateway
 	@echo "Creating working directory..."
 	install -d /var/lib/tinyfaas
 	@echo "Installing systemd service files to $(SYSTEMD_DIR)..."
 	install -d $(SYSTEMD_DIR)
 	install -m 644 systemd/tf-rproxy.service $(SYSTEMD_DIR)/
 	install -m 644 systemd/tf-manager.service $(SYSTEMD_DIR)/
+	install -m 644 systemd/tf-gateway.service $(SYSTEMD_DIR)/
 	@echo ""
 	@echo "Installation complete. To enable and start the services:"
 	@echo "  sudo systemctl daemon-reload"
-	@echo "  sudo systemctl enable tf-rproxy tf-manager"
-	@echo "  sudo systemctl start tf-rproxy tf-manager"
+	@echo "  sudo systemctl enable tf-gateway tf-rproxy tf-manager"
+	@echo "  sudo systemctl start tf-gateway tf-rproxy tf-manager"
 
 .PHONY: uninstall
 uninstall:
 	@echo "Stopping services..."
-	-systemctl stop tf-manager tf-rproxy 2>/dev/null || true
-	-systemctl disable tf-manager tf-rproxy 2>/dev/null || true
+	-systemctl stop tf-manager tf-rproxy tf-gateway 2>/dev/null || true
+	-systemctl disable tf-manager tf-rproxy tf-gateway 2>/dev/null || true
 	@echo "Removing binaries and service files..."
-	rm -f $(BINDIR)/tf-manager $(BINDIR)/tf-rproxy
-	rm -f $(SYSTEMD_DIR)/tf-manager.service $(SYSTEMD_DIR)/tf-rproxy.service
+	rm -f $(BINDIR)/tf-manager $(BINDIR)/tf-rproxy $(BINDIR)/tf-gateway
+	rm -f $(SYSTEMD_DIR)/tf-manager.service $(SYSTEMD_DIR)/tf-rproxy.service $(SYSTEMD_DIR)/tf-gateway.service
 	systemctl daemon-reload
 	@echo "Uninstall complete"
 
@@ -179,3 +184,10 @@ tf-rproxy-darwin-%: $(GO_FILES)
 
 tf-rproxy-linux-%: $(GO_FILES)
 	GOOS=linux GOARCH=$* go build -o $@ -v $(PKG)/cmd/rproxy
+
+# Build gateway binary (standalone, no runtime dependencies)
+tf-gateway-darwin-%: $(GO_FILES)
+	GOOS=darwin GOARCH=$* go build -o $@ -v $(PKG)/cmd/gateway
+
+tf-gateway-linux-%: $(GO_FILES)
+	GOOS=linux GOARCH=$* go build -o $@ -v $(PKG)/cmd/gateway

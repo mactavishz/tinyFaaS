@@ -98,7 +98,7 @@ func zipDirectory(t *testing.T, dirPath string) []byte {
 	return buf.Bytes()
 }
 
-// startFunction uploads and starts a function using Caddy API
+// startFunction uploads and starts a function using API
 func startFunction(t *testing.T, folderName, fnName, env string, threads int) string {
 	t.Helper()
 
@@ -123,7 +123,7 @@ func startFunction(t *testing.T, folderName, fnName, env string, threads int) st
 	payloadBytes, err := json.Marshal(payload)
 	require.NoError(t, err, "Failed to marshal payload")
 
-	// Upload via Caddy gateway
+	// Upload via gateway
 	uploadURL := fmt.Sprintf("http://%s:%d/system/upload", host, gatewayPort)
 	resp, err := http.Post(uploadURL, "application/json", bytes.NewReader(payloadBytes))
 	require.NoError(t, err, "Failed to upload function %s", fnName)
@@ -136,7 +136,7 @@ func startFunction(t *testing.T, folderName, fnName, env string, threads int) st
 	return fnName
 }
 
-// deleteFunction deletes a function using Caddy API
+// deleteFunction deletes a function using API
 func deleteFunction(t *testing.T, fnName string) {
 	t.Helper()
 
@@ -148,7 +148,7 @@ func deleteFunction(t *testing.T, fnName string) {
 	payloadBytes, err := json.Marshal(payload)
 	require.NoError(t, err, "Failed to marshal delete payload")
 
-	// Delete via Caddy gateway
+	// Delete via gateway
 	deleteURL := fmt.Sprintf("http://%s:%d/system/delete", host, gatewayPort)
 	resp, err := http.Post(deleteURL, "application/json", bytes.NewReader(payloadBytes))
 	if err != nil {
@@ -184,15 +184,15 @@ func (s *TinyFaaSTestSuite) SetupSuite() {
 		s.T().Fatal("Docker is not installed or not working")
 	}
 
-	// Wait for Caddy gateway
-	s.T().Log("Waiting for Caddy gateway...")
+	// Wait for gateway
+	s.T().Log("Waiting for gateway...")
 	if !waitForService(s.T(), host, gatewayPort, serviceStartupTimeout) {
 		s.T().Fatalf(
-			"Caddy gateway at %s:%d did not start within %v",
+			"gateway at %s:%d did not start within %v",
 			host, gatewayPort, serviceStartupTimeout,
 		)
 	}
-	s.T().Log("Caddy gateway is ready")
+	s.T().Log("gateway is ready")
 }
 
 // TearDownSuite runs once after all tests
