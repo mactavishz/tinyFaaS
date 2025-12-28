@@ -11,8 +11,8 @@ ExecStart=/usr/local/bin/tf-manager
 Restart=on-failure
 RestartSec=5
 
-# Environment variables (can be overridden in /etc/default/tf-manager)
-EnvironmentFile=-/etc/default/tf-manager
+# Environment variables (can be overridden in /etc/default/tinyfaas)
+EnvironmentFile=-/etc/default/tinyfaas
 
 # Default environment
 Environment=RPROXY_LISTEN_ADDRESS=127.0.0.1

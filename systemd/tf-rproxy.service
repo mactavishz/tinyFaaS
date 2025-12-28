@@ -15,8 +15,8 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 
-# Environment variables (can be overridden in /etc/default/tf-rproxy)
-EnvironmentFile=-/etc/default/tf-rproxy
+# Environment variables (can be overridden in /etc/default/tinyfaas)
+EnvironmentFile=-/etc/default/tinyfaas
 
 # Logging
 StandardOutput=journal

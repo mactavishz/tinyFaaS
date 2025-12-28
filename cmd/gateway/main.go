@@ -14,6 +14,7 @@ import (
 const (
 	rproxyAddr  = "localhost:8000"
 	managerAddr = "localhost:8080"
+	defaultPort = "80"
 )
 
 // extractSourceIP extracts the real client IP from the request
@@ -171,9 +172,9 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	port := os.Getenv("GATEWAY_PORT")
+	port := os.Getenv("TF_GATEWAY_PORT")
 	if port == "" {
-		port = "80"
+		port = defaultPort
 	}
 
 	mux := http.NewServeMux()
