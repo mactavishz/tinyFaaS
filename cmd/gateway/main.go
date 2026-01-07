@@ -29,7 +29,7 @@ func extractSourceIP(r *http.Request) string {
 	}
 
 	// Check X-Real-IP header
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+	if xri := r.Header.Get("X-Real-Ip"); xri != "" {
 		return xri
 	}
 
@@ -66,8 +66,8 @@ func proxyRequest(w http.ResponseWriter, r *http.Request, targetAddr string) {
 	}
 
 	// Log the headers being forwarded
-	log.Printf("Forwarding headers: X-FaaS-Source-IP=%s, X-FaaS-Request-ID=%s",
-		proxyReq.Header.Get("X-FaaS-Source-IP"), proxyReq.Header.Get("X-FaaS-Request-ID"))
+	log.Printf("Forwarding headers: X-Faas-Source-Ip=%s, X-Faas-Request-Id=%s",
+		proxyReq.Header.Get("X-Faas-Source-Ip"), proxyReq.Header.Get("X-Faas-Request-Id"))
 
 	// Send the request
 	client := &http.Client{}
@@ -96,20 +96,19 @@ func proxyRequest(w http.ResponseWriter, r *http.Request, targetAddr string) {
 // gatewayMiddleware adds gateway-specific headers
 func gatewayMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Extract source IP and set X-FaaS-Source-IP header
+		// Extract source IP and set X-Faas-Source-Ip header
 		sourceIP := extractSourceIP(r)
-		r.Header.Set("X-FaaS-Source-IP", sourceIP)
+		r.Header.Set("X-Faas-Source-Ip", sourceIP)
 
-		// Generate X-FaaS-Request-ID if not present
-		requestID := r.Header.Get("X-FaaS-Request-ID")
-		if requestID == "" {
+		// Generate X-Faas-Request-Id if not present
+		requestID := r.Header.Get("X-Faas-Request-Id")
+		if strings.TrimSpace(requestID) == "" {
 			requestID = uuid.New().String()
-			r.Header.Set("X-FaaS-Request-ID", requestID)
+			r.Header.Set("X-Faas-Request-Id", requestID)
 		}
 
-		log.Printf("Gateway middleware: path=%s, X-FaaS-Source-IP=%s, X-FaaS-Request-ID=%s",
-			r.URL.Path, r.Header.Get("X-FaaS-Source-IP"), r.Header.Get("X-FaaS-Request-ID"))
-
+		log.Printf("Gateway middleware: path=%s, X-Faas-Source-Ip=%s, X-Faas-Request-Id=%s",
+			r.URL.Path, r.Header.Get("X-Faas-Source-Ip"), r.Header.Get("X-Faas-Request-Id"))
 		next(w, r)
 	}
 }
