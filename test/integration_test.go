@@ -242,7 +242,7 @@ func (s *TestSieve) TestInvokeHTTPAsync() {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	require.NoError(s.T(), err)
 
-	req.Header.Set("X-tinyFaaS-Async", "true")
+	req.Header.Set("X-Tinyfaas-Async", "true")
 
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(s.T(), err)
