@@ -20,15 +20,9 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	ManagerPort = 8080
-	RProxyPort  = 8000
-)
-
 var (
-	// RProxyListenAddress can be overridden via RPROXY_LISTEN_ADDRESS env var
-	RProxyListenAddress  = util.GetEnvOrDefault("RPROXY_LISTEN_ADDRESS", "127.0.0.1")
-	ManagerListenAddress = util.GetEnvOrDefault("MANAGER_LISTEN_ADDRESS", "127.0.0.1")
+	ManagerPort = util.GetEnvOrDefault("MANAGER_PORT", "8080")
+	RProxyPort  = util.GetEnvOrDefault("RPROXY_PORT", "8000")
 )
 
 type server struct {
@@ -62,13 +56,12 @@ func main() {
 
 	ms := manager.New(
 		id,
-		RProxyListenAddress,
 		RProxyPort,
 		tfBackend,
 		logger,
 	)
 
-	logger.Info("manager expects rproxy", zap.String("address", RProxyListenAddress), zap.Int("port", RProxyPort))
+	logger.Info("manager expects rproxy", zap.String("port", RProxyPort))
 
 	// Initialize autoscaler
 	autoscalerConfig := autoscaler.NewConfigFromEnv("tinyfaas")
@@ -94,7 +87,7 @@ func main() {
 	r.HandleFunc("/heartbeat", s.heartbeatHandler)
 
 	// create HTTP server with graceful shutdown support
-	addr := fmt.Sprintf("%s:%d", ManagerListenAddress, ManagerPort)
+	addr := fmt.Sprintf("127.0.0.1:%s", ManagerPort)
 	httpServer := &http.Server{
 		Addr:    addr,
 		Handler: r,

@@ -90,7 +90,7 @@ func (op *TinyFaaSScaleOp) notifyRProxyAdd(functionName string, ips []string) er
 		return err
 	}
 
-	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://%s:%d/config", op.ms.rproxyAddr, op.ms.rproxyPort), bytes.NewBuffer(b))
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%s/config", op.ms.rproxyPort), bytes.NewBuffer(b))
 	if err != nil {
 		return err
 	}
@@ -122,7 +122,7 @@ func (op *TinyFaaSScaleOp) notifyRProxyClearIPs(functionName string) error {
 		return err
 	}
 
-	req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("http://%s:%d/config", op.ms.rproxyAddr, op.ms.rproxyPort), bytes.NewBuffer(b))
+	req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("http://127.0.0.1:%s/config", op.ms.rproxyPort), bytes.NewBuffer(b))
 	if err != nil {
 		return err
 	}

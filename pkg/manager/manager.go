@@ -35,8 +35,7 @@ type ManagementService struct {
 	backend               Backend
 	functionHandlers      map[string]Handler
 	functionHandlersMutex sync.Mutex
-	rproxyAddr            string
-	rproxyPort            int
+	rproxyPort            string
 	autoscaler            *autoscaler.AutoScaler
 	logger                *zap.Logger
 }
@@ -57,13 +56,12 @@ type Handler interface {
 	GetLabels() map[string]string
 }
 
-func New(id string, rproxyAddr string, rproxyPort int, tfBackend Backend, logger *zap.Logger) *ManagementService {
+func New(id string, rproxyPort string, tfBackend Backend, logger *zap.Logger) *ManagementService {
 
 	ms := &ManagementService{
 		id:               id,
 		backend:          tfBackend,
 		functionHandlers: make(map[string]Handler),
-		rproxyAddr:       rproxyAddr,
 		rproxyPort:       rproxyPort,
 		logger:           logger,
 	}
@@ -170,7 +168,7 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 
 	ms.logger.Info("notify rproxy", zap.String("function", name), zap.Strings("ips", fh.IPs()))
 
-	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://%s:%d/config", ms.rproxyAddr, ms.rproxyPort), bytes.NewBuffer(b))
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%s/config", ms.rproxyPort), bytes.NewBuffer(b))
 	if err != nil {
 		return err
 	}
@@ -297,7 +295,7 @@ func (ms *ManagementService) Delete(name string) error {
 	}
 
 	ms.logger.Info("notify rproxy", zap.String("function", name))
-	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://%s:%d/config", ms.rproxyAddr, ms.rproxyPort), bytes.NewBuffer(b))
+	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://127.0.0.1:%s/config", ms.rproxyPort), bytes.NewBuffer(b))
 	if err != nil {
 		return err
 	}
