@@ -1,205 +1,83 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"io"
-	"log"
 	"net/http"
 	"os"
-	"strings"
+	"os/signal"
+	"syscall"
+	"time"
 
-	"github.com/google/uuid"
+	"github.com/OpenFogStack/tinyFaaS/pkg/gateway"
+	"github.com/OpenFogStack/tinyFaaS/pkg/util"
+	"go.uber.org/zap"
 )
 
 const (
-	rproxyAddr  = "localhost:8000"
-	managerAddr = "localhost:8080"
 	defaultPort = "80"
 )
 
-// extractSourceIP extracts the real client IP from the request
-func extractSourceIP(r *http.Request) string {
-	// Check X-Forwarded-For header first
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first IP in the chain
-		if idx := strings.Index(xff, ","); idx != -1 {
-			return strings.TrimSpace(xff[:idx])
-		}
-		return strings.TrimSpace(xff)
-	}
-
-	// Check X-Real-IP header
-	if xri := r.Header.Get("X-Real-Ip"); xri != "" {
-		return xri
-	}
-
-	// Fall back to RemoteAddr
-	if idx := strings.LastIndex(r.RemoteAddr, ":"); idx != -1 {
-		return r.RemoteAddr[:idx]
-	}
-	return r.RemoteAddr
-}
-
-// proxyRequest forwards the request to the target address
-func proxyRequest(w http.ResponseWriter, r *http.Request, targetAddr string) {
-	// Create target URL
-	targetURL := fmt.Sprintf("http://%s%s", targetAddr, r.URL.Path)
-	if r.URL.RawQuery != "" {
-		targetURL += "?" + r.URL.RawQuery
-	}
-
-	log.Printf("Proxying %s %s -> %s", r.Method, r.URL.Path, targetURL)
-
-	// Create proxy request
-	proxyReq, err := http.NewRequest(r.Method, targetURL, r.Body)
-	if err != nil {
-		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
-		log.Printf("Error creating proxy request: %v", err)
-		return
-	}
-
-	// Copy headers from original request
-	for key, values := range r.Header {
-		for _, value := range values {
-			proxyReq.Header.Add(key, value)
-		}
-	}
-
-	// Log the headers being forwarded
-	log.Printf("Forwarding headers: X-Faas-Source-Ip=%s, X-Faas-Request-Id=%s",
-		proxyReq.Header.Get("X-Faas-Source-Ip"), proxyReq.Header.Get("X-Faas-Request-Id"))
-
-	// Send the request
-	client := &http.Client{}
-	resp, err := client.Do(proxyReq)
-	if err != nil {
-		http.Error(w, "Failed to proxy request", http.StatusBadGateway)
-		log.Printf("Error proxying request: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	// Copy response headers
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-
-	// Copy status code
-	w.WriteHeader(resp.StatusCode)
-
-	// Copy response body
-	io.Copy(w, resp.Body)
-}
-
-// gatewayMiddleware adds gateway-specific headers
-func gatewayMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Extract source IP and set X-Faas-Source-Ip header
-		sourceIP := extractSourceIP(r)
-		r.Header.Set("X-Faas-Source-Ip", sourceIP)
-
-		// Generate X-Faas-Request-Id if not present
-		requestID := r.Header.Get("X-Faas-Request-Id")
-		if strings.TrimSpace(requestID) == "" {
-			requestID = uuid.New().String()
-			r.Header.Set("X-Faas-Request-Id", requestID)
-		}
-
-		log.Printf("Gateway middleware: path=%s, X-Faas-Source-Ip=%s, X-Faas-Request-Id=%s",
-			r.URL.Path, r.Header.Get("X-Faas-Source-Ip"), r.Header.Get("X-Faas-Request-Id"))
-		next(w, r)
-	}
-}
-
-// handleFunctionInvoke handles /fn/* requests to rproxy
-func handleFunctionInvoke(w http.ResponseWriter, r *http.Request) {
-	// Rewrite path: /fn/funcname → /invoke/funcname
-	r.URL.Path = "/invoke" + strings.TrimPrefix(r.URL.Path, "/fn")
-	proxyRequest(w, r, rproxyAddr)
-}
-
-// handleSystemScaleUp handles /system/scale-up requests (restricted to localhost)
-func handleSystemScaleUp(w http.ResponseWriter, r *http.Request) {
-	sourceIP := extractSourceIP(r)
-	if sourceIP != "127.0.0.1" && sourceIP != "::1" && sourceIP != "localhost" {
-		http.Error(w, "Forbidden: scale-up endpoint is restricted to internal services only", http.StatusForbidden)
-		return
-	}
-
-	r.URL.Path = "/scale-up"
-	proxyRequest(w, r, managerAddr)
-}
-
-// handleSystemHeartbeat handles /system/heartbeat requests (restricted to localhost)
-func handleSystemHeartbeat(w http.ResponseWriter, r *http.Request) {
-	sourceIP := extractSourceIP(r)
-	if sourceIP != "127.0.0.1" && sourceIP != "::1" && sourceIP != "localhost" {
-		http.Error(w, "Forbidden: heartbeat endpoint is restricted to internal services only", http.StatusForbidden)
-		return
-	}
-
-	r.URL.Path = "/heartbeat"
-	proxyRequest(w, r, managerAddr)
-}
-
-// handleSystemOther handles other /system/* requests to manager
-func handleSystemOther(w http.ResponseWriter, r *http.Request) {
-	// Strip /system prefix before forwarding to manager
-	r.URL.Path = strings.TrimPrefix(r.URL.Path, "/system")
-	if r.URL.Path == "" {
-		r.URL.Path = "/"
-	}
-	proxyRequest(w, r, managerAddr)
-}
-
-// handleHealth handles /health requests
-func handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
-}
-
-// handleRoot handles / requests
-func handleRoot(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/" {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("tinyFaaS Gateway"))
-		return
-	}
-	http.NotFound(w, r)
-}
-
 func main() {
+	logger := util.CreateLogger()
+	defer logger.Sync() // flushes buffer, if any
+
 	port := os.Getenv("TF_GATEWAY_PORT")
 	if port == "" {
 		port = defaultPort
 	}
 
+	// Create gateway instance with options
+	var opts []gateway.Option
+
+	if rproxyPort := os.Getenv("TF_RPROXY_PORT"); rproxyPort != "" {
+		opts = append(opts, gateway.WithRProxyPort(rproxyPort))
+	}
+
+	if managerPort := os.Getenv("TF_MANAGER_PORT"); managerPort != "" {
+		opts = append(opts, gateway.WithManagerPort(managerPort))
+	}
+
+	g := gateway.New(logger, opts...)
+
 	mux := http.NewServeMux()
-
-	// Function invocation endpoint
-	mux.HandleFunc("/fn/", gatewayMiddleware(handleFunctionInvoke))
-
-	// System endpoints with access control
-	mux.HandleFunc("/system/scale-up", gatewayMiddleware(handleSystemScaleUp))
-	mux.HandleFunc("/system/heartbeat", gatewayMiddleware(handleSystemHeartbeat))
-
-	// Other system endpoints
-	mux.HandleFunc("/system/", gatewayMiddleware(handleSystemOther))
-
-	// Health check
-	mux.HandleFunc("/health", handleHealth)
-
-	// Root
-	mux.HandleFunc("/", handleRoot)
+	g.RegisterHandlers(mux)
 
 	addr := fmt.Sprintf(":%s", port)
-	log.Printf("tinyFaaS Gateway starting on %s", addr)
-	log.Printf("Proxying /fn/* to %s", rproxyAddr)
-	log.Printf("Proxying /system/* to %s", managerAddr)
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("Gateway failed to start: %v", err)
+	server := &http.Server{
+		Addr:    addr,
+		Handler: mux,
 	}
+
+	// Setup signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+
+	// Start server in goroutine
+	go func() {
+		logger.Info("tinyFaaS Gateway starting",
+			zap.String("address", addr),
+			zap.String("rproxyPort", g.GetRProxyPort()),
+			zap.String("managerPort", g.GetManagerPort()))
+
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Fatal("gateway failed to start", zap.Error(err))
+		}
+	}()
+
+	// Wait for shutdown signal
+	<-sigChan
+	logger.Info("received shutdown signal, initiating graceful shutdown...")
+
+	// Create context with timeout for graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	// Gracefully shutdown server
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Error("server shutdown error", zap.Error(err))
+	}
+
+	logger.Info("shutdown complete, exiting")
 }
