@@ -95,11 +95,6 @@ func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, targetAdd
 		targetURL += "?" + r.URL.RawQuery
 	}
 
-	g.logger.Debug("proxying request",
-		zap.String("method", r.Method),
-		zap.String("path", r.URL.Path),
-		zap.String("target", targetURL))
-
 	// Create proxy request
 	proxyReq, err := http.NewRequest(r.Method, targetURL, r.Body)
 	if err != nil {
@@ -111,9 +106,11 @@ func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, targetAdd
 	// Copy headers from original request
 	proxyReq.Header = r.Header.Clone()
 
-	g.logger.Debug("forwarding headers",
-		zap.String("X-Faas-Source-Ip", proxyReq.Header.Get("X-Faas-Source-Ip")),
-		zap.String("X-Faas-Request-Id", proxyReq.Header.Get("X-Faas-Request-Id")))
+	g.logger.Debug("proxying request",
+		zap.String("method", r.Method),
+		zap.String("path", r.URL.Path),
+		zap.String("targetAddr", targetURL),
+	)
 
 	// Send the request
 	client := &http.Client{}
@@ -153,7 +150,7 @@ func (g *Gateway) InvokeMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			r.Header.Set("X-Faas-Request-Id", requestID)
 		}
 
-		g.logger.Debug("gateway middleware",
+		g.logger.Debug("Invoke middleware",
 			zap.String("path", r.URL.Path),
 			zap.String("X-Faas-Source-Ip", r.Header.Get("X-Faas-Source-Ip")),
 			zap.String("X-Faas-Request-Id", r.Header.Get("X-Faas-Request-Id")))
