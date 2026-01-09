@@ -64,7 +64,10 @@ func main() {
 	logger.Info("manager expects rproxy", zap.String("port", RProxyPort))
 
 	// Initialize autoscaler
-	autoscalerConfig := autoscaler.NewConfigFromEnv("tinyfaas")
+	autoscalerConfig, err := autoscaler.NewConfigFromEnv("tinyfaas")
+	if err != nil {
+		logger.Fatal("failed to initialize autoscaler", zap.Error(err))
+	}
 	scaleOp := manager.NewTinyFaaSScaleOp(ms, logger)
 	as := autoscaler.New(autoscalerConfig, scaleOp, logger)
 	ms.SetAutoScaler(as)

@@ -31,7 +31,10 @@ func main() {
 	r := rproxy.New(logger)
 
 	// Initialize autoscaler for activity tracking
-	autoscalerConfig := autoscaler.NewConfigFromEnv("tinyfaas")
+	autoscalerConfig, err := autoscaler.NewConfigFromEnv("tinyfaas")
+	if err != nil {
+		logger.Fatal("failed to initialize autoscaler", zap.Error(err))
+	}
 	if autoscalerConfig.Enabled {
 		r.SetAutoScalerEnabled(true)
 		logger.Info("autoscaler enabled")
