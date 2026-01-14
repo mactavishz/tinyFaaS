@@ -37,22 +37,23 @@ const (
 var RUNTIMES = []string{"binary", "go", "nodejs", "python3"}
 
 type dockerHandler struct {
-	name        string
-	env         string
-	threads     int
-	uniqueName  string
-	filePath    string
-	client      *client.Client
-	network     string // per-function network ID
-	networkName string // per-function network name
-	containers  []string
-	handlerIPs  []string
-	isRunning   bool              // track if containers are running
-	opMux       sync.Mutex        // mutex for start/stop/restart operations
-	labels      map[string]string // store container labels
-	envVars     []string          // store environment variables for container recreation
-	extraHosts  []string          // store extra hosts for container recreation
-	logger      *zap.Logger
+	name            string
+	env             string
+	threads         int
+	uniqueName      string
+	filePath        string
+	client          *client.Client
+	network         string // per-function network ID
+	networkName     string // per-function network name
+	containers      []string
+	handlerIPs      []string
+	isRunning       bool              // track if containers are running
+	opMux           sync.Mutex        // mutex for start/stop/restart operations
+	labels          map[string]string // store user-provided labels (for GetLabels())
+	containerLabels map[string]string // store merged labels (system + user) for container creation
+	envVars         []string          // store environment variables for container recreation
+	extraHosts      []string          // store extra hosts for container recreation
+	logger          *zap.Logger
 }
 
 type DockerBackend struct {
@@ -279,37 +280,13 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 		containerLabels[k] = v
 	}
 
-	// Store config for later container recreation (scale-up)
+	// Store config for later container creation in Start()
 	dh.envVars = e
 	dh.extraHosts = extraHosts
+	dh.containerLabels = containerLabels
 
-	// create containers
-	// docker run -d --network <network> --name <container> <image>
-	for i := 0; i < dh.threads; i++ {
-		containerResp, err := db.client.ContainerCreate(
-			context.Background(),
-			&container.Config{
-				Image:  dh.uniqueName,
-				Labels: containerLabels,
-				Env:    e,
-			},
-			&container.HostConfig{
-				NetworkMode: container.NetworkMode(dh.networkName),
-				ExtraHosts:  extraHosts,
-			},
-			nil,
-			nil,
-			dh.uniqueName+fmt.Sprintf("-%d", i),
-		)
-
-		if err != nil {
-			return nil, err
-		}
-
-		db.logger.Info("created container", zap.String("containerID", containerResp.ID))
-
-		dh.containers = append(dh.containers, containerResp.ID)
-	}
+	// NOTE: Containers are NOT created here - they will be created in Start()
+	// This ensures cold start measurement includes container creation time
 
 	// remove folder
 	// rm -rf <folder>
@@ -330,9 +307,44 @@ func (dh *dockerHandler) IPs() []string {
 }
 
 func (dh *dockerHandler) Start() error {
-	dh.logger.Info("starting function containers", zap.Int("count", len(dh.containers)))
 	dh.opMux.Lock()
 	defer dh.opMux.Unlock()
+
+	if dh.isRunning {
+		dh.logger.Info("function is already running", zap.String("name", dh.name))
+		return nil
+	}
+
+	dh.logger.Info("creating and starting function containers", zap.String("name", dh.name), zap.String("image", dh.uniqueName))
+
+	// Clear any old container IDs
+	dh.containers = make([]string, 0, dh.threads)
+
+	// Create containers from image
+	for i := 0; i < dh.threads; i++ {
+		containerResp, err := dh.client.ContainerCreate(
+			context.Background(),
+			&container.Config{
+				Image:  dh.uniqueName,
+				Labels: dh.containerLabels,
+				Env:    dh.envVars,
+			},
+			&container.HostConfig{
+				NetworkMode: container.NetworkMode(dh.networkName),
+				ExtraHosts:  dh.extraHosts,
+			},
+			nil,
+			nil,
+			dh.uniqueName+fmt.Sprintf("-%d", i),
+		)
+
+		if err != nil {
+			return fmt.Errorf("failed to create container %d: %w", i, err)
+		}
+
+		dh.logger.Info("created container", zap.String("containerID", containerResp.ID), zap.Int("index", i))
+		dh.containers = append(dh.containers, containerResp.ID)
+	}
 
 	// Track which containers have successfully started and their IPs
 	containerIPs := make(map[string]string)
@@ -726,117 +738,9 @@ func (dh *dockerHandler) Stop() error {
 
 // Restart recreates and starts function containers from cached image (for scale-up from scale-to-zero)
 func (dh *dockerHandler) Restart() error {
-	dh.opMux.Lock()
-	defer dh.opMux.Unlock()
-
-	if dh.isRunning {
-		dh.logger.Info("function is already running", zap.String("name", dh.name))
-		return nil
-	}
-
-	dh.logger.Info("recreating function containers from cached image", zap.String("name", dh.name), zap.String("image", dh.uniqueName))
-
-	// Clear old container IDs since we're creating new containers
-	dh.containers = make([]string, 0, dh.threads)
-
-	// Recreate containers from cached image
-	for i := 0; i < dh.threads; i++ {
-		containerResp, err := dh.client.ContainerCreate(
-			context.Background(),
-			&container.Config{
-				Image:  dh.uniqueName,
-				Labels: dh.labels,
-				Env:    dh.envVars,
-			},
-			&container.HostConfig{
-				NetworkMode: container.NetworkMode(dh.networkName),
-				ExtraHosts:  dh.extraHosts,
-			},
-			nil,
-			nil,
-			dh.uniqueName+fmt.Sprintf("-%d", i),
-		)
-
-		if err != nil {
-			return fmt.Errorf("failed to create container %d: %w", i, err)
-		}
-
-		dh.logger.Info("created new container", zap.String("containerID", containerResp.ID), zap.Int("index", i))
-		dh.containers = append(dh.containers, containerResp.ID)
-	}
-
-	// Start all containers
-	wg := sync.WaitGroup{}
-	for _, c := range dh.containers {
-		wg.Add(1)
-		go func(containerID string) {
-			defer wg.Done()
-
-			err := dh.client.ContainerStart(
-				context.Background(),
-				containerID,
-				container.StartOptions{},
-			)
-			if err != nil {
-				dh.logger.Error("error starting container", zap.String("containerID", containerID), zap.Error(err))
-			} else {
-				dh.logger.Info("started new container", zap.String("containerID", containerID))
-			}
-		}(c)
-	}
-	wg.Wait()
-
-	// Get new container IPs
-	dh.handlerIPs = make([]string, 0, len(dh.containers))
-	for _, containerID := range dh.containers {
-		c, err := dh.client.ContainerInspect(
-			context.Background(),
-			containerID,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to inspect container %s: %w", containerID, err)
-		}
-
-		ip := c.NetworkSettings.Networks[dh.networkName].IPAddress
-		dh.handlerIPs = append(dh.handlerIPs, ip)
-		dh.logger.Info("got ip for recreated container", zap.String("ip", ip), zap.String("containerID", containerID))
-	}
-
-	// Wait for containers to be ready
-	for _, ip := range dh.handlerIPs {
-		dh.logger.Info("waiting for recreated container to be ready", zap.String("ip", ip))
-
-		err := retry.New(
-			retry.Attempts(5),
-			retry.Delay(100*time.Millisecond),
-			retry.OnRetry(func(attempt uint, err error) {
-				dh.logger.Debug("health check failed for container, retrying...", zap.String("ip", ip), zap.Uint("attempt", attempt), zap.Error(err))
-			}),
-		).Do(func() error {
-			client := http.Client{
-				Timeout: 3 * time.Second,
-			}
-			resp, err := client.Get("http://" + ip + ":8000/health")
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode == http.StatusOK {
-				dh.logger.Info("recreated container is ready", zap.String("ip", ip))
-				return nil
-			}
-			return fmt.Errorf("container health endpoint failed with status: %s", resp.Status)
-		})
-
-		if err != nil {
-			return fmt.Errorf("recreated container %s not ready after maximum retries: %w", ip, err)
-		}
-	}
-
-	dh.isRunning = true
-	dh.logger.Info("function scaled up (new containers created and started)", zap.String("name", dh.name))
-	return nil
+	// Restart is now identical to Start since both create containers from the cached image
+	// and start them. We delegate to Start() for consistent behavior and better error handling.
+	return dh.Start()
 }
 
 // IsRunning returns whether the function containers are currently running
