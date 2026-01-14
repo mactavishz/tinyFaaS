@@ -15,7 +15,8 @@ import (
 )
 
 const (
-	defaultPort = "80"
+	DEFAULT_PROT = "80"
+	DEFAULT_MODE = "development"
 )
 
 func main() {
@@ -24,7 +25,7 @@ func main() {
 
 	port := os.Getenv("TF_GATEWAY_PORT")
 	if port == "" {
-		port = defaultPort
+		port = DEFAULT_PROT
 	}
 
 	// Create gateway instance with options
@@ -37,6 +38,11 @@ func main() {
 	if managerPort := os.Getenv("TF_MANAGER_PORT"); managerPort != "" {
 		opts = append(opts, gateway.WithManagerPort(managerPort))
 	}
+
+	// Get mode from environment variable
+	env := util.GetEnvOrDefault("TF_ENV", DEFAULT_MODE)
+	logger.Info("Gateway ENV", zap.String("env", env))
+	opts = append(opts, gateway.WithMode(env))
 
 	g := gateway.New(logger, opts...)
 

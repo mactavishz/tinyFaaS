@@ -19,6 +19,7 @@ const (
 type Gateway struct {
 	rproxyPort  string
 	managerPort string
+	mode        string
 	logger      *zap.Logger
 }
 
@@ -39,6 +40,13 @@ func WithManagerPort(port string) Option {
 	}
 }
 
+// WithDevMode enables development mode features (debug endpoints)
+func WithMode(mode string) Option {
+	return func(g *Gateway) {
+		g.mode = mode
+	}
+}
+
 // New creates a new Gateway instance
 func New(logger *zap.Logger, opts ...Option) *Gateway {
 	g := &Gateway{
@@ -52,6 +60,14 @@ func New(logger *zap.Logger, opts ...Option) *Gateway {
 	}
 
 	return g
+}
+
+func (g *Gateway) IsDev() bool {
+	return strings.ToLower(g.mode) == "development"
+}
+
+func (g *Gateway) IsProd() bool {
+	return strings.ToLower(g.mode) == "production"
 }
 
 // rproxyAddr returns the full rproxy address
@@ -218,6 +234,24 @@ func (g *Gateway) HandleRoot(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+// HandleCallgraph handles /debug/callgraph requests (proxies to rproxy)
+func (g *Gateway) HandleCallgraph(w http.ResponseWriter, r *http.Request) {
+	r.URL.Path = "/callgraph"
+	g.proxyRequest(w, r, g.rproxyAddr())
+}
+
+// HandleCallgraphFunction handles /debug/callgraph/function/* requests (proxies to rproxy)
+func (g *Gateway) HandleCallgraphFunction(w http.ResponseWriter, r *http.Request) {
+	r.URL.Path = "/callgraph/function/" + strings.TrimPrefix(r.URL.Path, "/system/callgraph/function/")
+	g.proxyRequest(w, r, g.rproxyAddr())
+}
+
+// HandleCallgraphEdge handles /debug/callgraph/edge requests (proxies to rproxy)
+func (g *Gateway) HandleCallgraphEdge(w http.ResponseWriter, r *http.Request) {
+	r.URL.Path = "/callgraph/edge"
+	g.proxyRequest(w, r, g.rproxyAddr())
+}
+
 // RegisterHandlers registers all gateway handlers on the provided mux
 func (g *Gateway) RegisterHandlers(mux *http.ServeMux) {
 	// Function invocation endpoint
@@ -229,6 +263,14 @@ func (g *Gateway) RegisterHandlers(mux *http.ServeMux) {
 
 	// Other system endpoints
 	mux.HandleFunc("/system/", g.HandleSystemOther)
+
+	// Debug endpoints (only in development mode)
+	if g.IsDev() {
+		g.logger.Info("registering development mode only endpoints")
+		mux.HandleFunc("/system/callgraph/function/", g.HandleCallgraphFunction)
+		mux.HandleFunc("/system/callgraph/edge", g.HandleCallgraphEdge)
+		mux.HandleFunc("/system/callgraph", g.HandleCallgraph)
+	}
 
 	// Health check
 	mux.HandleFunc("/health", g.HandleHealth)
