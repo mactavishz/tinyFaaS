@@ -13,10 +13,15 @@ import (
 	"github.com/OpenFogStack/tinyFaaS/pkg/rproxy"
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
+	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/callgraph"
 	"go.uber.org/zap"
 )
 
 var emptyBody = []byte{}
+
+const (
+	DEFAULT_MODE = "development"
+)
 
 func main() {
 	logger := util.CreateLogger()
@@ -28,7 +33,10 @@ func main() {
 
 	listenAddr := os.Args[1]
 
-	r := rproxy.New(logger)
+	// Get mode from environment variable
+	mode := util.GetEnvOrDefault("TF_ENV", DEFAULT_MODE)
+	logger.Info("RProxy ENV", zap.String("env", mode))
+	r := rproxy.New(logger, mode)
 
 	// Initialize autoscaler for activity tracking
 	autoscalerConfig, err := autoscaler.NewConfigFromEnv("tinyfaas")
@@ -41,6 +49,30 @@ func main() {
 	} else {
 		logger.Info("autoscaler disabled")
 	}
+
+	// Initialize callgraph (includes prewarming)
+	callGraphConfig, err := callgraph.NewConfigFromEnv("tinyfaas")
+	if err != nil {
+		logger.Fatal("failed to initialize callgraph config", zap.Error(err))
+	}
+
+	tracker := callgraph.New(
+		callgraph.WithLogger(logger),
+		callgraph.WithConfig(&callGraphConfig),
+	)
+	r.SetTracker(tracker)
+	if callGraphConfig.Enabled {
+		logger.Info("callgraph tracking enabled")
+		if callGraphConfig.Prewarm.Enabled && autoscalerConfig.Enabled {
+			logger.Info("prewarming enabled")
+		} else if callGraphConfig.Prewarm.Enabled && !autoscalerConfig.Enabled {
+			logger.Warn("prewarming configured but autoscaler is disabled - prewarming will not work")
+		}
+	} else {
+		logger.Info("callgraph tracking disabled")
+	}
+	tracker.Start()
+
 	// Create single HTTP server with multiple endpoints
 	mux := http.NewServeMux()
 
@@ -154,11 +186,11 @@ func main() {
 			return
 		}
 
-		async := req.Header.Get("X-tinyFaaS-Async") != ""
+		async := req.Header.Get("X-Tinyfaas-Async") != ""
 
-		// Determine the caller by checking the X-FaaS-Source-IP header
-		// This header is set by Caddy to preserve the original source IP
-		sourceIP := req.Header.Get("X-FaaS-Source-IP")
+		// Determine the caller by checking the X-Faas-Source-Ip header
+		// This header is set by Gateway to preserve the original source IP
+		sourceIP := req.Header.Get("X-Faas-Source-Ip")
 		if sourceIP == "" {
 			// Fallback to RemoteAddr if header is not set
 			sourceIP = util.ExtractIP(req.RemoteAddr)
@@ -167,6 +199,20 @@ func main() {
 		logger.Debug("incoming request", zap.String("ip", sourceIP))
 		logger.Info("invoking function", zap.String("name", functionName), zap.Bool("async", async))
 
+		// Check if the caller is another function on the platform
+		callerFunctionName := ""
+		isInternalIP, err := util.IsPrivateIP(sourceIP)
+		if err == nil && isInternalIP {
+			// Try to identify the caller function by IP
+			if callerName, ok := r.GetFunctionNameByIP(sourceIP); ok {
+				callerFunctionName = callerName
+				logger.Info("Intra-platform invocation",
+					zap.String("caller", callerFunctionName),
+					zap.String("callee", functionName),
+					zap.String("sourceIP", sourceIP))
+			}
+		}
+
 		req_body, err := io.ReadAll(req.Body)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -174,12 +220,8 @@ func main() {
 			return
 		}
 
-		headers := make(map[string]string)
-		for k, v := range req.Header {
-			headers[k] = v[0]
-		}
-
-		s, res := r.Call(functionName, req_body, async, headers)
+		// Call handles all callgraph tracking internally (RecordCall, StartExecution, etc.)
+		s, res := r.Call(functionName, req_body, async, req.Header.Clone())
 
 		w.WriteHeader(s)
 		if res != nil {
@@ -187,6 +229,145 @@ func main() {
 		} else {
 			w.Write(emptyBody)
 		}
+	})
+
+	// Callgraph analytics API endpoints (only available in development mode)
+	if r.IsDev() {
+		logger.Info("registering development mode only callgraph endpoints")
+
+		// Get complete call graph
+		mux.HandleFunc("/callgraph", func(w http.ResponseWriter, req *http.Request) {
+			if req.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+
+			callGraphTracker := r.GetTracker()
+			callGraph := callGraphTracker.GetCallGraph()
+
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(callGraph); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				logger.Error("failed to encode call graph", zap.Error(err))
+				return
+			}
+		})
+
+		// Get function statistics
+		mux.HandleFunc("/callgraph/function/", func(w http.ResponseWriter, req *http.Request) {
+			if req.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+
+			tracker := r.GetTracker()
+			functionName := req.URL.Path[len("/callgraph/function/"):]
+			if functionName == "" {
+				// Return all function stats
+				stats := tracker.GetAllFunctionStats()
+
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(stats); err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					logger.Error("failed to encode function stats", zap.Error(err))
+					return
+				}
+				return
+			} else {
+				stats, ok := tracker.GetFunctionStats(functionName)
+				if !ok {
+					w.WriteHeader(http.StatusNotFound)
+					w.Write([]byte("function not found in call graph"))
+					return
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(stats); err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					logger.Error("failed to encode function stats", zap.Error(err))
+					return
+				}
+			}
+		})
+
+		// Get edge statistics
+		mux.HandleFunc("/callgraph/edge", func(w http.ResponseWriter, req *http.Request) {
+			if req.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+
+			caller := req.URL.Query().Get("caller")
+			callee := req.URL.Query().Get("callee")
+
+			if callee == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				w.Write([]byte("callee parameter is required"))
+				return
+			}
+
+			tracker := r.GetTracker()
+			edge, ok := tracker.GetEdgeStats(caller, callee)
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				w.Write([]byte("edge not found in call graph"))
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(edge); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				logger.Error("failed to encode edge stats", zap.Error(err))
+				return
+			}
+		})
+	}
+
+	// Record code-start or scale-up (prewarm) from manager
+	mux.HandleFunc("/callgraph/scaleup", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		var data struct {
+			FunctionName string `json:"name"`
+			Timestamp    int64  `json:"timestamp"`   // Unix nanoseconds
+			Duration     int64  `json:"duration_ns"` // Nanoseconds
+			Cold         bool   `json:"cold"`        // Whether this is a cold start
+		}
+
+		if err := json.NewDecoder(req.Body).Decode(&data); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			logger.Error("failed to decode scale-up request", zap.Error(err))
+			return
+		}
+
+		if data.FunctionName == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("function name is required"))
+			return
+		}
+
+		if data.Duration <= 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("duration must be positive"))
+			return
+		}
+
+		timestamp := time.Unix(0, data.Timestamp)
+		duration := time.Duration(data.Duration)
+
+		tracker.RecordScaleUp(data.FunctionName, timestamp, duration, data.Cold)
+
+		logger.Info("recorded scale-up from manager",
+			zap.String("function", data.FunctionName),
+			zap.Time("timestamp", timestamp),
+			zap.Duration("duration", duration),
+			zap.Bool("cold", data.Cold))
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
 	})
 
 	server := &http.Server{
@@ -210,6 +391,7 @@ func main() {
 	<-sigChan
 	logger.Info("received shutdown signal, initiating graceful shutdown...")
 
+	tracker.Stop()
 	// create context with timeout for graceful shutdown
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()

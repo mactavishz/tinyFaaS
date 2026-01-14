@@ -26,6 +26,7 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/callgraph v0.0.0
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/patternmatcher v0.6.0 // indirect
 	github.com/moby/sys/sequential v0.6.0 // indirect
@@ -54,3 +55,5 @@ require (
 )
 
 replace github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler => ../autoscaler
+
+replace github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/callgraph => ../callgraph
