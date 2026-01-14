@@ -437,6 +437,49 @@ func (ms *ManagementService) notifyScaleUp(name string, timestamp time.Time, dur
 	}
 }
 
+// notifyScaleDown sends scale-down data to rproxy for callgraph tracking
+func (ms *ManagementService) notifyScaleDown(name string, timestamp time.Time, duration time.Duration) {
+	data := struct {
+		FunctionName string `json:"name"`
+		Timestamp    int64  `json:"timestamp"`   // Unix nanoseconds
+		Duration     int64  `json:"duration_ns"` // Nanoseconds
+	}{
+		FunctionName: name,
+		Timestamp:    timestamp.UnixNano(),
+		Duration:     duration.Nanoseconds(),
+	}
+
+	body, err := json.Marshal(data)
+	if err != nil {
+		ms.logger.Error("failed to marshal scale-down data", zap.String("function", name), zap.Error(err))
+		return
+	}
+
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s/callgraph/scaledown", ms.rproxyPort), bytes.NewBuffer(body))
+	if err != nil {
+		ms.logger.Error("failed to create scale-down request", zap.String("function", name), zap.Error(err))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		ms.logger.Error("failed to notify rproxy of scale-down", zap.String("function", name), zap.Error(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		ms.logger.Warn("rproxy scale-down notification failed",
+			zap.String("function", name),
+			zap.Int("statusCode", resp.StatusCode))
+	} else {
+		ms.logger.Debug("notified rproxy of scale-down",
+			zap.String("function", name),
+			zap.Duration("duration", duration))
+	}
+}
+
 func (ms *ManagementService) Stop() error {
 	err := ms.Wipe()
 	if err != nil {

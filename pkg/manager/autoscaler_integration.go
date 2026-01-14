@@ -42,12 +42,22 @@ func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 	op.ms.autoscaler.MarkScalingDown(functionName, true)
 	defer op.ms.autoscaler.MarkScalingDown(functionName, false)
 
+	// Measure scale-down time
+	startTime := time.Now()
+
 	// Stop the containers
 	if err := handler.Stop(); err != nil {
 		return fmt.Errorf("failed to stop function %s: %w", functionName, err)
 	}
 
-	op.logger.Info("function scaled down", zap.String("function", functionName))
+	scaleDownDuration := time.Since(startTime)
+
+	// Record scale-down time to callgraph tracker via rproxy
+	op.ms.notifyScaleDown(functionName, startTime, scaleDownDuration)
+
+	op.logger.Info("function scaled down",
+		zap.String("function", functionName),
+		zap.Duration("duration", scaleDownDuration))
 	return nil
 }
 

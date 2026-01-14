@@ -370,6 +370,51 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
+	// Record scale-down from manager
+	mux.HandleFunc("/callgraph/scaledown", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		var data struct {
+			FunctionName string `json:"name"`
+			Timestamp    int64  `json:"timestamp"`   // Unix nanoseconds
+			Duration     int64  `json:"duration_ns"` // Nanoseconds
+		}
+
+		if err := json.NewDecoder(req.Body).Decode(&data); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			logger.Error("failed to decode scale-down request", zap.Error(err))
+			return
+		}
+
+		if data.FunctionName == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("function name is required"))
+			return
+		}
+
+		if data.Duration <= 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("duration must be positive"))
+			return
+		}
+
+		timestamp := time.Unix(0, data.Timestamp)
+		duration := time.Duration(data.Duration)
+
+		tracker.RecordScaleDown(data.FunctionName, timestamp, duration)
+
+		logger.Info("recorded scale-down from manager",
+			zap.String("function", data.FunctionName),
+			zap.Time("timestamp", timestamp),
+			zap.Duration("duration", duration))
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
 	server := &http.Server{
 		Addr:    listenAddr,
 		Handler: mux,
