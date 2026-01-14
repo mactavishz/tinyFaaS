@@ -415,6 +415,38 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
+	// Reset function stats on redeployment (called by manager)
+	mux.HandleFunc("/callgraph/reset", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		var data struct {
+			FunctionName string `json:"name"`
+		}
+
+		if err := json.NewDecoder(req.Body).Decode(&data); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			logger.Error("failed to decode reset request", zap.Error(err))
+			return
+		}
+
+		if data.FunctionName == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("function name is required"))
+			return
+		}
+
+		tracker.ResetFunctionStats(data.FunctionName)
+
+		logger.Info("reset function stats for redeployment",
+			zap.String("function", data.FunctionName))
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
 	server := &http.Server{
 		Addr:    listenAddr,
 		Handler: mux,

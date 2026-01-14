@@ -201,6 +201,12 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 		return fmt.Errorf("failed to notify rproxy, status code %d", resp.StatusCode)
 	}
 
+	// If this is a redeployment, reset callgraph stats first before recording fresh cold start
+	if oldHandler != nil {
+		ms.logger.Info("notifying rproxy of callgraph reset for redeployment", zap.String("function", name))
+		ms.notifyCallgraphReset(name)
+	}
+
 	// Send scale-up data to rproxy for callgraph tracking, marked as cold start since this is a new function
 	ms.notifyScaleUp(name, coldStartTime, coldStartDuration, true)
 
@@ -477,6 +483,44 @@ func (ms *ManagementService) notifyScaleDown(name string, timestamp time.Time, d
 		ms.logger.Debug("notified rproxy of scale-down",
 			zap.String("function", name),
 			zap.Duration("duration", duration))
+	}
+}
+
+// notifyCallgraphReset notifies rproxy to reset callgraph stats for a redeployed function
+func (ms *ManagementService) notifyCallgraphReset(name string) {
+	data := struct {
+		FunctionName string `json:"name"`
+	}{
+		FunctionName: name,
+	}
+
+	body, err := json.Marshal(data)
+	if err != nil {
+		ms.logger.Error("failed to marshal callgraph reset data", zap.String("function", name), zap.Error(err))
+		return
+	}
+
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s/callgraph/reset", ms.rproxyPort), bytes.NewBuffer(body))
+	if err != nil {
+		ms.logger.Error("failed to create callgraph reset request", zap.String("function", name), zap.Error(err))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		ms.logger.Error("failed to notify rproxy of callgraph reset", zap.String("function", name), zap.Error(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		ms.logger.Warn("rproxy callgraph reset notification failed",
+			zap.String("function", name),
+			zap.Int("statusCode", resp.StatusCode))
+	} else {
+		ms.logger.Info("notified rproxy of callgraph reset for redeployment",
+			zap.String("function", name))
 	}
 }
 
