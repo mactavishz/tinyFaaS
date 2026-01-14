@@ -101,6 +101,12 @@ func (r *RProxy) Del(name string) error {
 
 	// Now delete from routing table
 	delete(r.routingTable, name)
+
+	// Clear callgraph data for deleted function
+	if r.tracker != nil {
+		r.tracker.ClearFunctionData(name)
+	}
+
 	return nil
 }
 
