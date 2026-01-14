@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"sync"
+	"time"
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 	"github.com/google/uuid"
@@ -137,19 +138,26 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	}
 	ms.functionHandlersMutex.Unlock()
 
-	// create new function handler
+	// create new function handler (image build - not counted as cold start)
 	fh, err := ms.backend.Create(name, env, threads, p, envs, labels)
 
 	if err != nil {
 		return err
 	}
 
+	// Measure cold start time (container creation and start)
+	coldStartTime := time.Now()
 	err = fh.Start()
+	coldStartDuration := time.Since(coldStartTime)
 
 	if err != nil {
 		// container did not start properly...
 		return err
 	}
+
+	ms.logger.Info("cold start completed",
+		zap.String("function", name),
+		zap.Duration("duration", coldStartDuration))
 
 	// tell rproxy about the new function
 	// curl -X PUT http://<rproxyAddr>:<rproxyPort>/config -d '{"name": "<name>", "ips": ["<ip1>", "<ip2>"]}'
@@ -192,6 +200,9 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("failed to notify rproxy, status code %d", resp.StatusCode)
 	}
+
+	// Send scale-up data to rproxy for callgraph tracking, marked as cold start since this is a new function
+	ms.notifyScaleUp(name, coldStartTime, coldStartDuration, true)
 
 	ms.functionHandlersMutex.Lock()
 	ms.functionHandlers[name] = fh
@@ -377,6 +388,53 @@ func (ms *ManagementService) UrlUpload(name string, env string, threads int, fun
 	}
 
 	return nil
+}
+
+// notifyScaleUp sends scale-up or cold start data to rproxy for callgraph tracking
+func (ms *ManagementService) notifyScaleUp(name string, timestamp time.Time, duration time.Duration, cold bool) {
+	data := struct {
+		FunctionName string `json:"name"`
+		Timestamp    int64  `json:"timestamp"`   // Unix nanoseconds
+		Duration     int64  `json:"duration_ns"` // Nanoseconds
+		Cold         bool   `json:"cold"`        // Whether this is a cold start
+	}{
+		FunctionName: name,
+		Timestamp:    timestamp.UnixNano(),
+		Duration:     duration.Nanoseconds(),
+		Cold:         cold, // Whether this is a cold start
+	}
+
+	body, err := json.Marshal(data)
+	if err != nil {
+		ms.logger.Error("failed to marshal scale-up data", zap.String("function", name), zap.Error(err))
+		return
+	}
+
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s/callgraph/scaleup", ms.rproxyPort), bytes.NewBuffer(body))
+	if err != nil {
+		ms.logger.Error("failed to create scale-up request", zap.String("function", name), zap.Bool("cold", cold), zap.Error(err))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		ms.logger.Error("failed to notify rproxy of scale-up", zap.String("function", name), zap.Error(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		ms.logger.Warn("rproxy scale-up notification failed",
+			zap.String("function", name),
+			zap.Int("statusCode", resp.StatusCode),
+			zap.Bool("cold", cold))
+	} else {
+		ms.logger.Debug("notified rproxy of scale-up",
+			zap.String("function", name),
+			zap.Duration("duration", duration),
+			zap.Bool("cold", cold))
+	}
 }
 
 func (ms *ManagementService) Stop() error {

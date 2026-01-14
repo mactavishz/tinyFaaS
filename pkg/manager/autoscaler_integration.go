@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
 	"go.uber.org/zap"
@@ -151,8 +152,10 @@ func (ms *ManagementService) GetAutoScaler() *autoscaler.AutoScaler {
 	return ms.autoscaler
 }
 
-// ScaleUp scales up a function (for cold start)
-func (ms *ManagementService) ScaleUp(functionName string) error {
+// ScaleUp scales up a function and records the scale-up time to callgraph tracker via rproxy
+// cold=true means this is a user-facing cold start
+// cold=false means this is a proactive prewarm
+func (ms *ManagementService) ScaleUp(functionName string, cold bool) error {
 	if ms.autoscaler == nil || !ms.autoscaler.IsEnabled() {
 		return fmt.Errorf("autoscaler not enabled")
 	}
@@ -165,13 +168,26 @@ func (ms *ManagementService) ScaleUp(functionName string) error {
 		return fmt.Errorf("function %s is not scaled down", functionName)
 	}
 
+	// Measure scale-up time
+	startTime := time.Now()
+
 	// Scale up the function
 	if err := ms.autoscaler.ScaleUp(functionName); err != nil {
 		return err
 	}
 
+	scaleUpDuration := time.Since(startTime)
+
 	// Mark as scaled up in autoscaler
 	ms.autoscaler.MarkScaledDown(functionName, false)
+
+	// Record scale-up time to callgraph tracker via rproxy
+	ms.notifyScaleUp(functionName, startTime, scaleUpDuration, cold)
+
+	ms.logger.Info("scale-up completed",
+		zap.String("function", functionName),
+		zap.Bool("cold", cold),
+		zap.Duration("duration", scaleUpDuration))
 
 	return nil
 }
