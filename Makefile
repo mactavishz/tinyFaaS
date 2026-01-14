@@ -173,21 +173,21 @@ $(foreach arch,$(SUPPORTED_ARCH),$(foreach runtime,$(RUNTIMES),$(eval $(runtime_
 
 # Build manager binary (embeds runtime source files, base images built at startup)
 tf-manager-darwin-%: pkg/docker/runtimes-% $(GO_FILES)
-	GOOS=darwin GOARCH=$* go build -o $@ -v $(PKG)/cmd/manager
+	GOOS=darwin GOARCH=$* go build -buildvcs=false -o $@ -v $(PKG)/cmd/manager
 
 tf-manager-linux-%: pkg/docker/runtimes-% $(GO_FILES)
-	GOOS=linux GOARCH=$* go build -o $@ -v $(PKG)/cmd/manager
+	GOOS=linux GOARCH=$* go build -buildvcs=false -o $@ -v $(PKG)/cmd/manager
 
 # Build rproxy binary (standalone, no runtime dependencies)
 tf-rproxy-darwin-%: $(GO_FILES)
-	GOOS=darwin GOARCH=$* go build -o $@ -v $(PKG)/cmd/rproxy
+	GOOS=darwin GOARCH=$* go build -buildvcs=false -o $@ -v $(PKG)/cmd/rproxy
 
 tf-rproxy-linux-%: $(GO_FILES)
-	GOOS=linux GOARCH=$* go build -o $@ -v $(PKG)/cmd/rproxy
+	GOOS=linux GOARCH=$* go build -buildvcs=false -o $@ -v $(PKG)/cmd/rproxy
 
 # Build gateway binary (standalone, no runtime dependencies)
 tf-gateway-darwin-%: $(GO_FILES)
-	GOOS=darwin GOARCH=$* go build -o $@ -v $(PKG)/cmd/gateway
+	GOOS=darwin GOARCH=$* go build -buildvcs=false -o $@ -v $(PKG)/cmd/gateway
 
 tf-gateway-linux-%: $(GO_FILES)
-	GOOS=linux GOARCH=$* go build -o $@ -v $(PKG)/cmd/gateway
+	GOOS=linux GOARCH=$* go build -buildvcs=false -o $@ -v $(PKG)/cmd/gateway
