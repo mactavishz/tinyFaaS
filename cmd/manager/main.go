@@ -384,6 +384,7 @@ func (s *server) scaleUpHandler(w http.ResponseWriter, r *http.Request) {
 	// parse request
 	d := struct {
 		FunctionName string `json:"name"`
+		Cold      bool   `json:"cold"`
 	}{}
 
 	err := json.NewDecoder(r.Body).Decode(&d)
@@ -394,9 +395,9 @@ func (s *server) scaleUpHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("receive scale up request", zap.String("name", d.FunctionName))
+	s.logger.Info("receive scale up request", zap.String("name", d.FunctionName), zap.Bool("cold", d.Cold))
 	// scale up function
-	err = s.ms.ScaleUp(d.FunctionName)
+	err = s.ms.ScaleUp(d.FunctionName, d.Cold)
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
