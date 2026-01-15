@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -30,6 +31,17 @@ type RProxy struct {
 	autoscalerEnabled   bool
 	tracker             callgraph.FullTracker
 	logger              *zap.Logger
+	// Shared HTTP client for internal requests (heartbeat, scale-up)
+	// Configured with connection pooling for efficient local communication
+	httpClient *http.Client
+	// Heartbeat worker: single goroutine sends batch heartbeats periodically
+	// Functions are added to pendingHeartbeats when invoked, and the worker
+	// flushes them to the manager at heartbeatInterval
+	heartbeatInterval time.Duration
+	pendingHeartbeats map[string]struct{}
+	heartbeatMux      sync.Mutex
+	heartbeatStopChan chan struct{}
+	heartbeatDoneChan chan struct{}
 }
 
 func (r *Route) PickIP() (string, error) {
@@ -39,12 +51,43 @@ func (r *Route) PickIP() (string, error) {
 	return r.ips[rand.Intn(len(r.ips))], nil
 }
 
+// DefaultHeartbeatInterval is the interval at which the heartbeat worker sends batch heartbeats.
+// This should be significantly smaller than the autoscaler's check interval (default 10s)
+// to ensure at least 2-3 heartbeats are sent per check cycle under sustained load.
+// Using 2 seconds provides ~5 heartbeats per check cycle as a safety margin.
+const DefaultHeartbeatInterval = 2 * time.Second
+
+// newHTTPClient creates an HTTP client optimized for internal communication.
+// Uses connection pooling to reduce connection overhead for frequent requests.
+func newHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        50,
+			MaxIdleConnsPerHost: 20, // High since we communicate with few hosts (localhost)
+			MaxConnsPerHost:     50,
+			IdleConnTimeout:     120 * time.Second,
+			DisableCompression:  true,  // Local communication, no need for compression
+			DisableKeepAlives:   false, // Keep connections alive for reuse
+			DialContext: (&net.Dialer{
+				Timeout:   2 * time.Second,
+				KeepAlive: 60 * time.Second,
+			}).DialContext,
+		},
+	}
+}
+
 func New(logger *zap.Logger, mode string) *RProxy {
 	return &RProxy{
 		routingTable:        make(map[string]*Route),
 		reverseRoutingTable: make(map[string]string),
 		mode:                mode,
 		logger:              logger,
+		httpClient:          newHTTPClient(),
+		heartbeatInterval:   DefaultHeartbeatInterval,
+		pendingHeartbeats:   make(map[string]struct{}),
+		heartbeatStopChan:   make(chan struct{}),
+		heartbeatDoneChan:   make(chan struct{}),
 	}
 }
 
@@ -171,7 +214,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 		}
 	}
 
-	go r.heartbeat(name)
+	r.queueHeartbeat(name)
 
 	// choose random handler
 	ip, err := route.PickIP()
@@ -342,13 +385,86 @@ func (r *RProxy) executePrewarm(funcName string) {
 	}
 }
 
-func (r *RProxy) heartbeat(name string) error {
+// queueHeartbeat adds a function to the pending heartbeat set.
+// The heartbeat worker will batch-send heartbeats for all pending functions.
+// This is a non-blocking operation that avoids spawning goroutines per-call.
+func (r *RProxy) queueHeartbeat(name string) {
+	if name == "" {
+		return
+	}
+	r.heartbeatMux.Lock()
+	r.pendingHeartbeats[name] = struct{}{}
+	r.heartbeatMux.Unlock()
+}
+
+// StartHeartbeatWorker starts the background goroutine that sends batch heartbeats.
+// This should be called once when the rproxy starts.
+func (r *RProxy) StartHeartbeatWorker() {
+	go r.heartbeatWorker()
+}
+
+// StopHeartbeatWorker stops the heartbeat worker gracefully.
+// This should be called during shutdown.
+func (r *RProxy) StopHeartbeatWorker() {
+	close(r.heartbeatStopChan)
+	<-r.heartbeatDoneChan
+}
+
+// heartbeatWorker is the background goroutine that periodically sends batch heartbeats.
+func (r *RProxy) heartbeatWorker() {
+	defer close(r.heartbeatDoneChan)
+
+	ticker := time.NewTicker(r.heartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			r.flushHeartbeats()
+		case <-r.heartbeatStopChan:
+			// Final flush before stopping
+			r.flushHeartbeats()
+			return
+		}
+	}
+}
+
+// flushHeartbeats collects all pending heartbeats and sends them in a single batch request.
+func (r *RProxy) flushHeartbeats() {
+	// Collect and clear pending heartbeats atomically
+	r.heartbeatMux.Lock()
+	if len(r.pendingHeartbeats) == 0 {
+		r.heartbeatMux.Unlock()
+		return
+	}
+	functions := make([]string, 0, len(r.pendingHeartbeats))
+	for name := range r.pendingHeartbeats {
+		functions = append(functions, name)
+	}
+	// Clear the map by creating a new one (more efficient for large maps)
+	r.pendingHeartbeats = make(map[string]struct{})
+	r.heartbeatMux.Unlock()
+
+	// Send batch heartbeat
+	if err := r.sendBatchHeartbeat(functions); err != nil {
+		r.logger.Debug("failed to send batch heartbeat", zap.Strings("functions", functions), zap.Error(err))
+		// Re-queue failed functions for next cycle
+		r.heartbeatMux.Lock()
+		for _, name := range functions {
+			r.pendingHeartbeats[name] = struct{}{}
+		}
+		r.heartbeatMux.Unlock()
+	}
+}
+
+// sendBatchHeartbeat sends a batch heartbeat request to the manager.
+func (r *RProxy) sendBatchHeartbeat(functions []string) error {
 	url := "http://127.0.0.1/system/heartbeat"
 
 	reqData := struct {
-		FunctionName string `json:"name"`
+		Functions []string `json:"functions"`
 	}{
-		FunctionName: name,
+		Functions: functions,
 	}
 
 	body, err := json.Marshal(reqData)
@@ -360,7 +476,7 @@ func (r *RProxy) heartbeat(name string) error {
 		retry.Attempts(3),
 		retry.Delay(100*time.Millisecond),
 		retry.OnRetry(func(attempt uint, err error) {
-			r.logger.Debug("heartbeat attempt failed", zap.Uint("attempt", attempt), zap.String("name", name), zap.Error(err))
+			r.logger.Debug("batch heartbeat attempt failed", zap.Uint("attempt", attempt), zap.Strings("functions", functions), zap.Error(err))
 		}),
 	).Do(
 		func() error {
@@ -370,27 +486,22 @@ func (r *RProxy) heartbeat(name string) error {
 			}
 			req.Header.Set("Content-Type", "application/json")
 
-			client := &http.Client{Timeout: 30 * time.Second}
-			resp, err := client.Do(req)
+			resp, err := r.httpClient.Do(req)
 			if err != nil {
 				return err
 			}
 			defer resp.Body.Close()
 
 			if resp.StatusCode != http.StatusOK {
-				return err
+				return fmt.Errorf("batch heartbeat returned status %d", resp.StatusCode)
 			}
 
-			r.logger.Info("successfully triggered heartbeat", zap.String("name", name))
+			r.logger.Debug("successfully sent batch heartbeat", zap.Int("count", len(functions)))
 			return nil
 		},
 	)
 
-	if err != nil {
-		r.logger.Error("failed to trigger heartbeat", zap.String("name", name), zap.Error(err))
-		return err
-	}
-	return nil
+	return err
 }
 
 // scaleUpFunction calls the manager to scale up a function
@@ -426,15 +537,14 @@ func (r *RProxy) scaleUpFunction(name string, cold bool) error {
 			}
 			req.Header.Set("Content-Type", "application/json")
 
-			client := &http.Client{Timeout: 30 * time.Second}
-			resp, err := client.Do(req)
+			resp, err := r.httpClient.Do(req)
 			if err != nil {
 				return err
 			}
 			defer resp.Body.Close()
 
 			if resp.StatusCode != http.StatusOK {
-				return err
+				return fmt.Errorf("scale-up returned status %d", resp.StatusCode)
 			}
 
 			r.logger.Info("successfully scaled up the function", zap.String("name", name), zap.Bool("cold", cold))

@@ -452,6 +452,12 @@ func main() {
 		Handler: mux,
 	}
 
+	// Start heartbeat worker (sends batch heartbeats to manager)
+	if autoscalerConfig.Enabled {
+		r.StartHeartbeatWorker()
+		logger.Info("heartbeat worker started")
+	}
+
 	// setup signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
@@ -467,6 +473,12 @@ func main() {
 	// wait for shutdown signal
 	<-sigChan
 	logger.Info("received shutdown signal, initiating graceful shutdown...")
+
+	// Stop heartbeat worker first
+	if autoscalerConfig.Enabled {
+		r.StopHeartbeatWorker()
+		logger.Info("heartbeat worker stopped")
+	}
 
 	tracker.Stop()
 	// create context with timeout for graceful shutdown
