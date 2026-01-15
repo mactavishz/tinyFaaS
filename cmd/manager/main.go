@@ -384,7 +384,7 @@ func (s *server) scaleUpHandler(w http.ResponseWriter, r *http.Request) {
 	// parse request
 	d := struct {
 		FunctionName string `json:"name"`
-		Cold      bool   `json:"cold"`
+		Cold         bool   `json:"cold"`
 	}{}
 
 	err := json.NewDecoder(r.Body).Decode(&d)
@@ -419,9 +419,10 @@ func (s *server) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// parse request
+	// Support both single heartbeat (name) and batch heartbeat (functions)
 	d := struct {
-		FunctionName string `json:"name"`
+		FunctionName string   `json:"name"`      // Single heartbeat (legacy)
+		Functions    []string `json:"functions"` // Batch heartbeat
 	}{}
 
 	err := json.NewDecoder(r.Body).Decode(&d)
@@ -432,11 +433,34 @@ func (s *server) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("receive heartbeat request", zap.String("name", d.FunctionName))
+	// Handle batch heartbeat
+	if len(d.Functions) > 0 {
+		s.logger.Debug("receive batch heartbeat request", zap.Int("count", len(d.Functions)))
 
-	// heartbeat function
+		err = s.ms.HeartbeatBatch(d.Functions)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "failed to record batch heartbeat\n")
+			s.logger.Error("failed to record batch heartbeat", zap.Strings("functions", d.Functions), zap.Error(err))
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "Batch heartbeat for %d functions recorded\n", len(d.Functions))
+		s.logger.Debug("batch heartbeat recorded successfully", zap.Int("count", len(d.Functions)))
+		return
+	}
+
+	// Handle single heartbeat (legacy)
+	if d.FunctionName == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "missing function name or functions array\n")
+		return
+	}
+
+	s.logger.Debug("receive heartbeat request", zap.String("name", d.FunctionName))
+
 	err = s.ms.Heartbeat(d.FunctionName)
-
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "failed to record heartbeat\n")
@@ -444,8 +468,7 @@ func (s *server) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// return success
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "Heartbeat for function %s recorded\n", d.FunctionName)
-	s.logger.Info("heartbeat recorded successfully", zap.String("name", d.FunctionName))
+	s.logger.Debug("heartbeat recorded successfully", zap.String("name", d.FunctionName))
 }
