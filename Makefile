@@ -24,7 +24,8 @@ help:
 	@echo "Main targets:"
 	@echo "  make build                  - Build tf-manager and tf-rproxy binaries"
 	@echo "  make start                  - Show commands to start services"
-	@echo "  make test                   - Run tests"
+	@echo "  make unit-test              - Run unit tests"
+	@echo "  make integration-test       - Run integration tests"
 	@echo "  make clean                  - Clean build artifacts (preserves embedded runtime files)"
 	@echo "  make install                - Install binaries and systemd services"
 	@echo ""
@@ -68,10 +69,10 @@ unit-test:
 	@echo "Running unit tests..."
 	go test -count=1 -v ./pkg/... --cover
 
-.PHONY: test
-test:
+.PHONY: integration-test
+integration-test:
 	@echo "Running integration tests..."
-	go test -count=1 -v -timeout 5m ./test
+	go test -count=1 -v -timeout 10m ./test/integrations/...
 
 .PHONY: clean
 clean:
