@@ -11,4 +11,4 @@ fi
 GATEWAY_HOST=${GATEWAY_HOST:-localhost}
 GATEWAY_PORT=${GATEWAY_PORT:-80}
 
-curl -X GET http://${GATEWAY_HOST}:${GATEWAY_PORT}/system/list
+curl -X GET http://"${GATEWAY_HOST}":"${GATEWAY_PORT}"/system/list
