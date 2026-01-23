@@ -26,9 +26,9 @@ func NewTinyFaaSScaleOp(ms *ManagementService, logger *zap.Logger) *TinyFaaSScal
 
 // ScaleDown stops the function containers
 func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
-	op.ms.functionHandlersMutex.Lock()
+	op.ms.mux.Lock()
 	handler, exists := op.ms.functionHandlers[functionName]
-	op.ms.functionHandlersMutex.Unlock()
+	op.ms.mux.Unlock()
 
 	if !exists {
 		return fmt.Errorf("function %s not found", functionName)
@@ -63,9 +63,9 @@ func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 
 // ScaleUp starts the function containers
 func (op *TinyFaaSScaleOp) ScaleUp(functionName string) error {
-	op.ms.functionHandlersMutex.Lock()
+	op.ms.mux.Lock()
 	handler, exists := op.ms.functionHandlers[functionName]
-	op.ms.functionHandlersMutex.Unlock()
+	op.ms.mux.Unlock()
 
 	if !exists {
 		return fmt.Errorf("function %s not found", functionName)

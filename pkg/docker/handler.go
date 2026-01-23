@@ -39,7 +39,9 @@ var RUNTIMES = []string{"binary", "go", "nodejs", "python3"}
 type dockerHandler struct {
 	name            string
 	env             string
-	threads         int
+	replicas        int
+	nanoCPUs        int64
+	memoryBytes     int64
 	uniqueName      string
 	filePath        string
 	client          *client.Client
@@ -139,7 +141,7 @@ func (db *DockerBackend) getRuntimeBaseImage(runtime string) string {
 	return fmt.Sprintf("tinyfaas-runtime-%s", runtime)
 }
 
-func (db *DockerBackend) Create(name string, env string, threads int, filedir string, envs map[string]string, labels map[string]string) (manager.Handler, error) {
+func (db *DockerBackend) Create(name string, env string, replicas int, filedir string, envs map[string]string, labels map[string]string, limits manager.ResourceLimits) (manager.Handler, error) {
 
 	// make a unique function name by appending uuid string to function name
 	uuid, err := uuid.NewRandom()
@@ -148,15 +150,17 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 	}
 
 	dh := &dockerHandler{
-		name:       name,
-		env:        env,
-		client:     db.client,
-		threads:    threads,
-		containers: make([]string, 0, threads),
-		handlerIPs: make([]string, 0, threads),
-		isRunning:  false,
-		labels:     labels,
-		logger:     db.logger,
+		name:        name,
+		env:         env,
+		client:      db.client,
+		replicas:    replicas,
+		nanoCPUs:    limits.NanoCPUs,
+		memoryBytes: limits.MemoryBytes,
+		containers:  make([]string, 0, replicas),
+		handlerIPs:  make([]string, 0, replicas),
+		isRunning:   false,
+		labels:      labels,
+		logger:      db.logger,
 	}
 
 	dh.uniqueName = name + "-" + uuid.String()
@@ -318,10 +322,10 @@ func (dh *dockerHandler) Start() error {
 	dh.logger.Info("creating and starting function containers", zap.String("name", dh.name), zap.String("image", dh.uniqueName))
 
 	// Clear any old container IDs
-	dh.containers = make([]string, 0, dh.threads)
+	dh.containers = make([]string, 0, dh.replicas)
 
 	// Create containers from image
-	for i := 0; i < dh.threads; i++ {
+	for i := 0; i < dh.replicas; i++ {
 		containerResp, err := dh.client.ContainerCreate(
 			context.Background(),
 			&container.Config{
@@ -332,6 +336,10 @@ func (dh *dockerHandler) Start() error {
 			&container.HostConfig{
 				NetworkMode: container.NetworkMode(dh.networkName),
 				ExtraHosts:  dh.extraHosts,
+				Resources: container.Resources{
+					NanoCPUs: dh.nanoCPUs,
+					Memory:   dh.memoryBytes,
+				},
 			},
 			nil,
 			nil,

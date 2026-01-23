@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"sort"
 	"sync"
 	"time"
 
@@ -32,17 +33,18 @@ func getEnvOrDefault(key, defaultValue string) string {
 }
 
 type ManagementService struct {
-	id                    string
-	backend               Backend
-	functionHandlers      map[string]Handler
-	functionHandlersMutex sync.Mutex
-	rproxyPort            string
-	autoscaler            *autoscaler.AutoScaler
-	logger                *zap.Logger
+	id               string
+	backend          Backend
+	functionHandlers map[string]Handler
+	functionConfigs  map[string]FunctionConfig
+	mux              sync.Mutex
+	rproxyPort       string
+	autoscaler       *autoscaler.AutoScaler
+	logger           *zap.Logger
 }
 
 type Backend interface {
-	Create(name string, env string, threads int, filedir string, envs map[string]string, labels map[string]string) (Handler, error)
+	Create(name string, env string, threads int, filedir string, envs map[string]string, labels map[string]string, limits ResourceLimits) (Handler, error)
 	Stop() error
 }
 
@@ -63,6 +65,7 @@ func New(id string, rproxyPort string, tfBackend Backend, logger *zap.Logger) *M
 		id:               id,
 		backend:          tfBackend,
 		functionHandlers: make(map[string]Handler),
+		functionConfigs:  make(map[string]FunctionConfig),
 		rproxyPort:       rproxyPort,
 		logger:           logger,
 	}
@@ -70,7 +73,7 @@ func New(id string, rproxyPort string, tfBackend Backend, logger *zap.Logger) *M
 	return ms
 }
 
-func (ms *ManagementService) createFunction(name string, env string, threads int, funczip []byte, subfolderPath string, envs map[string]string, labels map[string]string) error {
+func (ms *ManagementService) createFunction(name string, env string, replicas int, funczip []byte, subfolderPath string, envs map[string]string, labels map[string]string, resources FunctionResourceRequest) error {
 
 	// validate function name according to RFC 1035 DNS label rules
 	if !util.IsValidFunctionName(name) {
@@ -130,16 +133,20 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 		p = path.Join(p, subfolderPath)
 	}
 
+	resolvedLimits, effectiveLimits, backendLimits, err := EffectiveResourceLimits(resources.Limits)
+	if err != nil {
+		return fmt.Errorf("invalid limits: %w", err)
+	}
 	// if function already exists, keep it while deploying the new version
 	var oldHandler Handler
-	ms.functionHandlersMutex.Lock()
+	ms.mux.Lock()
 	if existingHandler, ok := ms.functionHandlers[name]; ok {
 		oldHandler = existingHandler
 	}
-	ms.functionHandlersMutex.Unlock()
+	ms.mux.Unlock()
 
 	// create new function handler (image build - not counted as cold start)
-	fh, err := ms.backend.Create(name, env, threads, p, envs, labels)
+	fh, err := ms.backend.Create(name, env, replicas, p, envs, labels, backendLimits)
 
 	if err != nil {
 		return err
@@ -210,9 +217,21 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	// Send scale-up data to rproxy for callgraph tracking, marked as cold start since this is a new function
 	ms.notifyScaleUp(name, coldStartTime, coldStartDuration, true)
 
-	ms.functionHandlersMutex.Lock()
+	config := FunctionConfig{
+		Name:            name,
+		Env:             env,
+		Replicas:     replicas,
+		Envs:            envs,
+		Labels:          labels,
+		Limits:          resolvedLimits,
+		EffectiveLimits: effectiveLimits,
+		Running:         fh.IsRunning(),
+	}
+
+	ms.mux.Lock()
 	ms.functionHandlers[name] = fh
-	ms.functionHandlersMutex.Unlock()
+	ms.functionConfigs[name] = config
+	ms.mux.Unlock()
 
 	// Register with autoscaler
 	if ms.autoscaler != nil {
@@ -235,7 +254,14 @@ func (ms *ManagementService) Logs() (io.Reader, error) {
 
 	var logs bytes.Buffer
 	ms.logger.Info("collecting logs from all functions")
+	ms.mux.Lock()
+	names := make([]string, 0, len(ms.functionHandlers))
 	for name := range ms.functionHandlers {
+		names = append(names, name)
+	}
+	ms.mux.Unlock()
+
+	for _, name := range names {
 		l, err := ms.LogsFunction(name)
 		if err != nil {
 			ms.logger.Error("error getting logs for function", zap.String("function", name), zap.Error(err))
@@ -255,7 +281,9 @@ func (ms *ManagementService) Logs() (io.Reader, error) {
 
 func (ms *ManagementService) LogsFunction(name string) (io.Reader, error) {
 
+	ms.mux.Lock()
 	fh, ok := ms.functionHandlers[name]
+	ms.mux.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("function %s not found", name)
 	}
@@ -263,36 +291,53 @@ func (ms *ManagementService) LogsFunction(name string) (io.Reader, error) {
 	return fh.Logs()
 }
 
-func (ms *ManagementService) List() []string {
+func (ms *ManagementService) List() []FunctionConfig {
 	ms.logger.Info("listing functions")
-	list := make([]string, 0, len(ms.functionHandlers))
-	for name := range ms.functionHandlers {
-		list = append(list, name)
-	}
 
+	ms.mux.Lock()
+	list := make([]FunctionConfig, 0, len(ms.functionHandlers))
+	for name, h := range ms.functionHandlers {
+		cfg, ok := ms.functionConfigs[name]
+		if !ok {
+			cfg = FunctionConfig{Name: name}
+		}
+		cfg.Running = h.IsRunning()
+		list = append(list, cfg)
+	}
+	ms.mux.Unlock()
+
+	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
 	return list
 }
 
 func (ms *ManagementService) Wipe() error {
 	ms.logger.Info("wiping all functions")
+
+	ms.mux.Lock()
+	names := make([]string, 0, len(ms.functionHandlers))
 	for name := range ms.functionHandlers {
+		names = append(names, name)
+	}
+	ms.mux.Unlock()
+
+	for _, name := range names {
 		ms.logger.Info("destroying function", zap.String("function", name))
-		ms.Delete(name)
+		_ = ms.Delete(name)
 	}
 
 	return nil
 }
 
 func (ms *ManagementService) Delete(name string) error {
+	ms.mux.Lock()
 	fh, ok := ms.functionHandlers[name]
 	if !ok {
+		ms.mux.Unlock()
 		return fmt.Errorf("function %s not found", name)
 	}
 
 	ms.logger.Info("deleting function", zap.String("function", name))
-
-	ms.functionHandlersMutex.Lock()
-	defer ms.functionHandlersMutex.Unlock()
+	defer ms.mux.Unlock()
 
 	err := fh.Destroy()
 	if err != nil {
@@ -335,6 +380,7 @@ func (ms *ManagementService) Delete(name string) error {
 	}
 
 	delete(ms.functionHandlers, name)
+	delete(ms.functionConfigs, name)
 	ms.logger.Info("function deleted", zap.String("function", name))
 
 	// Unregister from autoscaler
@@ -345,7 +391,7 @@ func (ms *ManagementService) Delete(name string) error {
 	return nil
 }
 
-func (ms *ManagementService) Upload(name string, env string, threads int, zipped string, envs map[string]string, labels map[string]string) error {
+func (ms *ManagementService) Upload(name string, env string, threads int, zipped string, envs map[string]string, labels map[string]string, resources FunctionResourceRequest) error {
 
 	// b64 decode zip
 	zip, err := base64.StdEncoding.DecodeString(zipped)
@@ -355,7 +401,7 @@ func (ms *ManagementService) Upload(name string, env string, threads int, zipped
 	}
 
 	// create function handler
-	err = ms.createFunction(name, env, threads, zip, "", envs, labels)
+	err = ms.createFunction(name, env, threads, zip, "", envs, labels, resources)
 
 	if err != nil {
 		ms.logger.Error("error creating function", zap.String("function", name), zap.Error(err))
@@ -365,7 +411,7 @@ func (ms *ManagementService) Upload(name string, env string, threads int, zipped
 	return nil
 }
 
-func (ms *ManagementService) UrlUpload(name string, env string, threads int, funcurl string, subfolder string, envs map[string]string, labels map[string]string) error {
+func (ms *ManagementService) UrlUpload(name string, env string, replicas int, funcurl string, subfolder string, envs map[string]string, labels map[string]string, resources FunctionResourceRequest) error {
 
 	// download url
 	resp, err := http.Get(funcurl)
@@ -386,7 +432,7 @@ func (ms *ManagementService) UrlUpload(name string, env string, threads int, fun
 	}
 
 	// create function handler
-	err = ms.createFunction(name, env, threads, zip, subfolder, envs, labels)
+	err = ms.createFunction(name, env, replicas, zip, subfolder, envs, labels, resources)
 
 	if err != nil {
 		ms.logger.Error("error creating function", zap.String("function", name), zap.Error(err))

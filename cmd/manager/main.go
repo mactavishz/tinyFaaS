@@ -147,12 +147,13 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	// parse request
 	d := struct {
-		FunctionName    string            `json:"name"`
-		FunctionEnv     string            `json:"env"`
-		FunctionThreads int               `json:"threads"`
-		FunctionZip     string            `json:"zip"`
-		FunctionEnvs    []string          `json:"envs"`
-		FunctionLabels  map[string]string `json:"labels"`
+		FunctionName     string                     `json:"name"`
+		FunctionEnv      string                     `json:"env"`
+		FunctionReplicas int                        `json:"replicas"`
+		FunctionZip      string                     `json:"zip"`
+		FunctionEnvs     []string                   `json:"envs"`
+		FunctionLabels   map[string]string          `json:"labels"`
+		Limits           *manager.FunctionResources `json:"limits"`
 	}{}
 
 	err := json.NewDecoder(r.Body).Decode(&d)
@@ -163,7 +164,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("receive upload request", zap.String("name", d.FunctionName), zap.String("env", d.FunctionEnv), zap.Int("threads", d.FunctionThreads), zap.Int("bytes", len(d.FunctionZip)), zap.Strings("envs", d.FunctionEnvs), zap.Any("labels", d.FunctionLabels))
+	s.logger.Info("receive upload request", zap.String("name", d.FunctionName), zap.String("env", d.FunctionEnv), zap.Int("replicas", d.FunctionReplicas), zap.Int("bytes", len(d.FunctionZip)), zap.Strings("envs", d.FunctionEnvs), zap.Any("labels", d.FunctionLabels), zap.Any("limits", d.Limits))
 	envs := make(map[string]string)
 	for _, e := range d.FunctionEnvs {
 		k, v, ok := strings.Cut(e, "=")
@@ -180,7 +181,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 		d.FunctionLabels = make(map[string]string)
 	}
 
-	err = s.ms.Upload(d.FunctionName, d.FunctionEnv, d.FunctionThreads, d.FunctionZip, envs, d.FunctionLabels)
+	err = s.ms.Upload(d.FunctionName, d.FunctionEnv, d.FunctionReplicas, d.FunctionZip, envs, d.FunctionLabels, manager.FunctionResourceRequest{Limits: d.Limits})
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -244,9 +245,8 @@ func (s *server) listHandler(w http.ResponseWriter, r *http.Request) {
 
 	// return success
 	w.WriteHeader(http.StatusOK)
-	for _, f := range l {
-		fmt.Fprintf(w, "%s\n", f)
-	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(l)
 }
 
 func (s *server) wipeHandler(w http.ResponseWriter, r *http.Request) {
@@ -325,13 +325,14 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	// parse request
 	d := struct {
-		FunctionName    string            `json:"name"`
-		FunctionEnv     string            `json:"env"`
-		FunctionThreads int               `json:"threads"`
-		FunctionURL     string            `json:"url"`
-		FunctionEnvs    []string          `json:"envs"`
-		SubFolder       string            `json:"subfolder_path"`
-		FunctionLabels  map[string]string `json:"labels"`
+		FunctionName     string                     `json:"name"`
+		FunctionEnv      string                     `json:"env"`
+		FunctionReplicas int                        `json:"replicas"`
+		FunctionURL      string                     `json:"url"`
+		FunctionEnvs     []string                   `json:"envs"`
+		SubFolder        string                     `json:"subfolder_path"`
+		FunctionLabels   map[string]string          `json:"labels"`
+		Limits           *manager.FunctionResources `json:"limits"`
 	}{}
 
 	err := json.NewDecoder(r.Body).Decode(&d)
@@ -342,7 +343,7 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("receive url upload request", zap.String("name", d.FunctionName), zap.String("env", d.FunctionEnv), zap.Int("threads", d.FunctionThreads), zap.String("url", d.FunctionURL), zap.Strings("envs", d.FunctionEnvs), zap.String("subfolder", d.SubFolder), zap.Any("labels", d.FunctionLabels))
+	s.logger.Info("receive url upload request", zap.String("name", d.FunctionName), zap.String("env", d.FunctionEnv), zap.Int("replicas", d.FunctionReplicas), zap.String("url", d.FunctionURL), zap.Strings("envs", d.FunctionEnvs), zap.String("subfolder", d.SubFolder), zap.Any("labels", d.FunctionLabels), zap.Any("limits", d.Limits))
 
 	envs := make(map[string]string)
 	for _, e := range d.FunctionEnvs {
@@ -360,7 +361,7 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 		d.FunctionLabels = make(map[string]string)
 	}
 
-	err = s.ms.UrlUpload(d.FunctionName, d.FunctionEnv, d.FunctionThreads, d.FunctionURL, d.SubFolder, envs, d.FunctionLabels)
+	err = s.ms.UrlUpload(d.FunctionName, d.FunctionEnv, d.FunctionReplicas, d.FunctionURL, d.SubFolder, envs, d.FunctionLabels, manager.FunctionResourceRequest{Limits: d.Limits})
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
