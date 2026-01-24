@@ -1,8 +1,9 @@
-"use strict";
+import express from "express";
+
 process.chdir("fn");
 
-const handler = require("handler");
-const express = require("express");
+const { default: handler } = await import("handler");
+
 const app = express();
 
 // parse application/json
