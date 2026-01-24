@@ -1,5 +1,5 @@
 #https://nodejs.org/en/docs/guides/nodejs-docker-webapp/
-ARG NODE_VERSION=24.11.1
+ARG NODE_VERSION=24.13
 ARG ALPINE_VERSION=3.23
 
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
