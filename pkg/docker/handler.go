@@ -461,8 +461,8 @@ func (dh *dockerHandler) Start() error {
 				dh.logger.Info("waiting for container to be ready", zap.String("containerID", dh.containers[index]), zap.String("ip", containerIP))
 
 				err := retry.New(
-					retry.Attempts(5),
-					retry.Delay(100*time.Millisecond),
+					retry.Attempts(10),
+					retry.Delay(200*time.Millisecond),
 					retry.OnRetry(func(retryAttempt uint, err error) {
 						dh.logger.Debug("health check attempt failed", zap.Uint("attempt", retryAttempt), zap.String("containerID", dh.containers[index]), zap.String("ip", containerIP), zap.Error(err))
 					}),
