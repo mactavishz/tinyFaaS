@@ -165,7 +165,7 @@ func (db *DockerBackend) Create(name string, env string, replicas int, filedir s
 	}
 
 	dh.uniqueName = name + "-" + uuid.String()
-	db.logger.Info("creating function", zap.String("name", name), zap.String("uniqueName", dh.uniqueName))
+	db.logger.Info("creating function", zap.String("name", dh.name))
 
 	// Get runtime base image tag (verified at startup)
 	baseImageTag := db.getRuntimeBaseImage(dh.env)
@@ -212,7 +212,7 @@ func (db *DockerBackend) Create(name string, env string, replicas int, filedir s
 		return nil, err
 	}
 
-	db.logger.Info("building image", zap.String("uniqueName", dh.uniqueName))
+	db.logger.Info("building image", zap.String("name", dh.name))
 	r, err := db.client.ImageBuild(
 		ctx,
 		tar,
@@ -246,11 +246,10 @@ func (db *DockerBackend) Create(name string, env string, replicas int, filedir s
 		nil, // auxCallback (optional: used to capture the final Image ID)
 	)
 
-	db.logger.Info("built image", zap.String("uniqueName", dh.uniqueName))
-
 	// Create per-function isolated network
 	// Each function gets its own network, so functions cannot directly communicate with each other
-	// They can only reach the host (where Caddy runs) via the gateway
+	// They can only reach the host via the gateway
+	db.logger.Info("creating isolated network", zap.String("name", dh.name))
 	networkResp, err := db.client.NetworkCreate(
 		ctx,
 		dh.uniqueName,
@@ -270,7 +269,6 @@ func (db *DockerBackend) Create(name string, env string, replicas int, filedir s
 
 	dh.network = networkResp.ID
 	dh.networkName = dh.uniqueName
-	db.logger.Info("created isolated network", zap.String("networkName", dh.uniqueName))
 
 	e := make([]string, 0, len(envs))
 
@@ -329,13 +327,12 @@ func (dh *dockerHandler) Start() error {
 		return nil
 	}
 
-	dh.logger.Info("creating and starting function containers", zap.String("name", dh.name))
-
 	// Clear any old container IDs
 	dh.containers = make([]string, 0, dh.replicas)
 
 	// Create containers from image
 	for i := 0; i < dh.replicas; i++ {
+		dh.logger.Info("creating function container", zap.String("name", dh.name), zap.Int("replica", i+1))
 		containerResp, err := dh.client.ContainerCreate(
 			ctx,
 			client.ContainerCreateOptions{
@@ -358,8 +355,6 @@ func (dh *dockerHandler) Start() error {
 		if err != nil {
 			return fmt.Errorf("failed to create container %d: %w", i, err)
 		}
-
-		dh.logger.Info("created container", zap.Int("replica", i+1))
 		dh.containers = append(dh.containers, containerResp.ID)
 	}
 
@@ -390,34 +385,34 @@ func (dh *dockerHandler) Start() error {
 			}
 
 			wg.Add(1)
-			go func(containerID string) {
+			go func(cid string) {
 				defer wg.Done()
 
 				// Start container
+				dh.logger.Info("starting container", zap.String("ID", util.GetShortID(cid)))
 				_, err := dh.client.ContainerStart(
 					context.Background(),
-					containerID,
+					cid,
 					client.ContainerStartOptions{},
 				)
 				if err != nil {
 					dh.logger.Error("error starting container", zap.Error(err))
 					startMux.Lock()
-					startErrors = append(startErrors, fmt.Errorf("failed to start container %s: %w", containerID, err))
+					startErrors = append(startErrors, fmt.Errorf("failed to start container %s: %w", util.GetShortID(cid), err))
 					startMux.Unlock()
 					return
 				}
-				dh.logger.Info("container started")
 
 				// Get container IP immediately after starting
 				inspectRes, err := dh.client.ContainerInspect(
 					context.Background(),
-					containerID,
+					cid,
 					client.ContainerInspectOptions{},
 				)
 				if err != nil {
 					dh.logger.Error("failed to inspect container", zap.Error(err))
 					startMux.Lock()
-					startErrors = append(startErrors, fmt.Errorf("failed to inspect container %s: %w", containerID, err))
+					startErrors = append(startErrors, fmt.Errorf("failed to inspect container %s: %w", util.GetShortID(cid), err))
 					startMux.Unlock()
 					return
 				}
@@ -426,14 +421,14 @@ func (dh *dockerHandler) Start() error {
 				if !ip.IsValid() {
 					dh.logger.Error("container IP address not found", zap.String("network", dh.networkName))
 					startMux.Lock()
-					startErrors = append(startErrors, fmt.Errorf("container %s has no IP address", containerID))
+					startErrors = append(startErrors, fmt.Errorf("container %s has no IP address", util.GetShortID(cid)))
 					startMux.Unlock()
 					return
 				}
 
 				dh.logger.Info("container IP", zap.String("ip", ip.String()))
 				ipMux.Lock()
-				containerIPs[containerID] = ip.String()
+				containerIPs[cid] = ip.String()
 				ipMux.Unlock()
 			}(c)
 		}
@@ -446,13 +441,13 @@ func (dh *dockerHandler) Start() error {
 
 		// Build ordered IP list matching container order
 		tempHandlerIPs := make([]string, 0, len(dh.containers))
-		for _, containerID := range dh.containers {
+		for _, cid := range dh.containers {
 			ipMux.Lock()
-			ip := containerIPs[containerID]
+			ip := containerIPs[cid]
 			ipMux.Unlock()
 
 			if ip == "" {
-				return fmt.Errorf("missing IP in container %s", containerID)
+				return fmt.Errorf("missing IP in container %s", cid)
 			}
 			tempHandlerIPs = append(tempHandlerIPs, ip)
 		}
@@ -466,27 +461,27 @@ func (dh *dockerHandler) Start() error {
 
 		for i, ip := range dh.handlerIPs {
 			wg.Add(1)
-			go func(index int, containerIP string) {
+			go func(index int, cip string) {
 				defer wg.Done()
-				dh.logger.Info("waiting for container to be ready", zap.String("ip", containerIP))
+				dh.logger.Info("waiting for container to be ready", zap.String("ip", cip))
 
 				err := retry.New(
 					retry.Attempts(10),
 					retry.Delay(200*time.Millisecond),
 					retry.OnRetry(func(retryAttempt uint, err error) {
-						dh.logger.Debug("health check attempt failed", zap.Uint("attempt", retryAttempt), zap.String("ip", containerIP))
+						dh.logger.Debug("health check attempt failed", zap.Uint("attempt", retryAttempt), zap.String("ip", cip))
 					}),
 				).Do(func() error {
 					client := http.Client{
 						Timeout: 3 * time.Second,
 					}
-					resp, err := client.Get("http://" + containerIP + ":8000/health")
+					resp, err := client.Get("http://" + cip + ":8000/health")
 					if err != nil {
 						return err
 					}
 					defer resp.Body.Close()
 					if resp.StatusCode == http.StatusOK {
-						dh.logger.Info("container is ready", zap.String("ip", containerIP))
+						dh.logger.Info("container is ready", zap.String("ip", cip))
 						return nil
 					}
 					return fmt.Errorf("container health probe failed with status: %s", resp.Status)
@@ -494,9 +489,9 @@ func (dh *dockerHandler) Start() error {
 
 				if err != nil {
 					containerID := dh.containers[index]
-					dh.logger.Error("container not ready after health check retries", zap.String("ip", containerIP), zap.Error(err))
+					dh.logger.Error("container not ready after health check retries", zap.String("ip", cip), zap.Error(err))
 					healthMux.Lock()
-					healthErrors = append(healthErrors, fmt.Errorf("container %s, ip: %s not ready: %w", containerID, containerIP, err))
+					healthErrors = append(healthErrors, fmt.Errorf("container %s, ip: %s not ready: %w", util.GetShortID(containerID), cip, err))
 					healthMux.Unlock()
 				}
 			}(i, ip)
@@ -511,9 +506,9 @@ func (dh *dockerHandler) Start() error {
 				containerID := dh.containers[i]
 				logs, logErr := dh.getContainerLogs(containerID)
 				if logErr != nil {
-					dh.logger.Error("error getting logs for container", zap.String("containerID", containerID), zap.Error(logErr))
+					dh.logger.Error("error getting logs for container", zap.String("ID", util.GetShortID(containerID)), zap.Error(logErr))
 				} else {
-					dh.logger.Info("logs for container", zap.String("containerID", containerID), zap.String("logs", logs))
+					dh.logger.Info("logs for container", zap.String("ID", util.GetShortID(containerID)), zap.String("logs", logs))
 				}
 			}
 			return fmt.Errorf("%d containers failed health checks: %v", len(healthErrors), healthErrors)
@@ -540,17 +535,17 @@ func (dh *dockerHandler) stopContainers() {
 	wg := sync.WaitGroup{}
 	for _, c := range dh.containers {
 		wg.Add(1)
-		go func(containerID string) {
+		go func(cid string) {
 			defer wg.Done()
 
 			_, err := dh.client.ContainerStop(
 				context.Background(),
-				containerID,
+				cid,
 				// default using timeout of 10 seconds
 				client.ContainerStopOptions{},
 			)
 			if err != nil {
-				dh.logger.Error("error stopping container", zap.String("containerID", containerID), zap.Error(err))
+				dh.logger.Error("error stopping container", zap.String("ID", cid), zap.Error(err))
 			} else {
 				dh.logger.Info("container stopped")
 			}
@@ -561,37 +556,37 @@ func (dh *dockerHandler) stopContainers() {
 	dh.isRunning = false
 }
 
-// deleteContainers stops and removes all function containers (used by scale-to-zero)
+// removeContainers stops and removes all function containers (used by scale-to-zero)
 // This frees up system resources by completely removing the containers
-func (dh *dockerHandler) deleteContainers() {
+func (dh *dockerHandler) removeContainers() {
 	wg := sync.WaitGroup{}
 	for _, c := range dh.containers {
 		wg.Add(1)
-		go func(containerID string) {
+		go func(cid string) {
 			defer wg.Done()
 
-			_, err := dh.client.ContainerStop(
-				context.Background(),
-				containerID,
-				client.ContainerStopOptions{},
-			)
-			if err != nil {
-				dh.logger.Error("error stopping container", zap.String("containerID", containerID), zap.Error(err))
-			} else {
-				dh.logger.Info("stopped container")
-			}
+			// _, err := dh.client.ContainerStop(
+			// 	context.Background(),
+			// 	cid,
+			// 	client.ContainerStopOptions{},
+			// )
+			// if err != nil {
+			// 	dh.logger.Error("error stopping container", zap.String("ID", util.GetShortID(cid)), zap.Error(err))
+			// } else {
+			// 	dh.logger.Info("stopped container")
+			// }
 
 			// Remove container
-			_, err = dh.client.ContainerRemove(
+			_, err := dh.client.ContainerRemove(
 				context.Background(),
-				containerID,
+				cid,
 				client.ContainerRemoveOptions{
 					RemoveVolumes: true,
 					Force:         true,
 				},
 			)
 			if err != nil {
-				dh.logger.Error("error removing container", zap.String("containerID", containerID), zap.Error(err))
+				dh.logger.Error("error removing container", zap.String("ID", util.GetShortID(cid)), zap.Error(err))
 			} else {
 				dh.logger.Info("removed container")
 			}
@@ -608,37 +603,38 @@ func (dh *dockerHandler) Destroy() error {
 	dh.logger.Info("destroying function", zap.String("name", dh.name))
 
 	wg := sync.WaitGroup{}
-	for _, c := range dh.containers {
+	for _, cid := range dh.containers {
 		wg.Add(1)
-		go func(c string) {
-			dh.logger.Info("stopping container", zap.String("name", dh.name))
+		go func(cid string) {
+			// dh.logger.Info("stopping container", zap.String("name", dh.name))
 
-			_, err := dh.client.ContainerStop(
+			// _, err := dh.client.ContainerStop(
+			// 	context.Background(),
+			// 	cid,
+			// 	client.ContainerStopOptions{},
+			// )
+			// if err != nil {
+			// 	dh.logger.Error("error stopping container", zap.String("containerID", cid), zap.Error(err))
+			// }
+
+			// dh.logger.Info("container stopped", zap.String("name", dh.name))
+
+			_, err := dh.client.ContainerRemove(
 				context.Background(),
-				c,
-				client.ContainerStopOptions{},
-			)
-			if err != nil {
-				dh.logger.Error("error stopping container", zap.String("containerID", c), zap.Error(err))
-			}
-
-			dh.logger.Info("container stopped", zap.String("name", dh.name))
-
-			_, err = dh.client.ContainerRemove(
-				context.Background(),
-				c,
+				cid,
 				client.ContainerRemoveOptions{
 					RemoveVolumes: true,
 					Force:         true,
 				},
 			)
 			if err != nil {
-				dh.logger.Error("error removing container", zap.String("containerID", c), zap.Error(err))
+				dh.logger.Error("error removing container", zap.String("ID", util.GetShortID(cid)), zap.Error(err))
+			} else {
+				dh.logger.Info("container removed", zap.String("name", dh.name))
 			}
 			wg.Done()
-		}(c)
+		}(cid)
 
-		dh.logger.Info("container removed", zap.String("name", dh.name))
 	}
 	wg.Wait()
 
@@ -649,9 +645,9 @@ func (dh *dockerHandler) Destroy() error {
 		client.NetworkRemoveOptions{},
 	)
 	if err != nil {
-		dh.logger.Error("error removing network", zap.String("network", dh.network), zap.Error(err))
+		dh.logger.Error("error removing network", zap.String("network", util.GetShortID(dh.network)), zap.Error(err))
 	} else {
-		dh.logger.Info("network removed", zap.String("network", dh.network))
+		dh.logger.Info("network removed", zap.String("network", util.GetShortID(dh.network)))
 	}
 
 	// remove image
@@ -669,7 +665,7 @@ func (dh *dockerHandler) Destroy() error {
 		return err
 	}
 
-	dh.logger.Info("image removed", zap.String("image", dh.uniqueName))
+	dh.logger.Info("image removed", zap.String("name", dh.name))
 	return nil
 }
 
@@ -745,8 +741,8 @@ func (dh *dockerHandler) Stop() error {
 		return nil
 	}
 
-	dh.logger.Info("stopping function containers", zap.String("name", dh.name))
-	dh.deleteContainers()
+	dh.logger.Info("removing function containers", zap.String("name", dh.name))
+	dh.removeContainers()
 	dh.logger.Info("function scaled down", zap.String("name", dh.name))
 	return nil
 }
