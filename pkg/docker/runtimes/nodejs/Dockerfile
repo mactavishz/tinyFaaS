@@ -6,6 +6,7 @@ WORKDIR /usr/src/app
 
 COPY fn/package.json fn/package.json
 
+RUN pnpm install --dir ./fn --prod
 RUN pnpm add ./fn
 
 COPY fn fn
