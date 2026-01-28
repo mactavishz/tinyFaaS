@@ -79,6 +79,7 @@ clean:
 	@echo "Cleaning build artifacts..."
 	rm -f tf-manager-*
 	rm -f tf-rproxy-*
+	rm -f tf-gateway-*
 	rm -f tinyfaas-*
 	@echo "Running additional clean-up script..."
 	./clean.sh
