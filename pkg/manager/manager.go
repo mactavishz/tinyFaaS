@@ -169,11 +169,13 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 	// tell rproxy about the new function
 	// curl -X PUT http://<rproxyAddr>:<rproxyPort>/config -d '{"name": "<name>", "ips": ["<ip1>", "<ip2>"]}'
 	d := struct {
-		FunctionName string   `json:"name"`
-		FunctionIPs  []string `json:"ips"`
+		FunctionName string            `json:"name"`
+		FunctionIPs  []string          `json:"ips"`
+		Labels       map[string]string `json:"labels,omitempty"`
 	}{
 		FunctionName: name,
 		FunctionIPs:  fh.IPs(),
+		Labels:       labels,
 	}
 
 	b, err := json.Marshal(d)
@@ -220,7 +222,7 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 	config := FunctionConfig{
 		Name:            name,
 		Env:             env,
-		Replicas:     replicas,
+		Replicas:        replicas,
 		Envs:            envs,
 		Labels:          labels,
 		Limits:          resolvedLimits,

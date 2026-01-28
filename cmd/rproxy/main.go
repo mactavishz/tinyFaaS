@@ -81,8 +81,9 @@ func main() {
 		switch req.Method {
 		case http.MethodPut:
 			var def struct {
-				FunctionResource   string   `json:"name"`
-				FunctionContainers []string `json:"ips"`
+				FunctionResource   string            `json:"name"`
+				FunctionContainers []string          `json:"ips"`
+				FunctionLabels     map[string]string `json:"labels"`
 			}
 			err := json.NewDecoder(req.Body).Decode(&def)
 			if err != nil {
@@ -102,7 +103,11 @@ func main() {
 				return
 			}
 
-			err = r.Add(def.FunctionResource, def.FunctionContainers)
+			if def.FunctionLabels == nil {
+				def.FunctionLabels = make(map[string]string)
+			}
+
+			err = r.Add(def.FunctionResource, def.FunctionContainers, def.FunctionLabels)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				logger.Error("failed to add function", zap.Error(err))
@@ -358,7 +363,9 @@ func main() {
 		timestamp := time.Unix(0, data.Timestamp)
 		duration := time.Duration(data.Duration)
 
-		tracker.RecordScaleUp(data.FunctionName, timestamp, duration, data.Cold)
+		if r.CallgraphEnabled(data.FunctionName) {
+			tracker.RecordScaleUp(data.FunctionName, timestamp, duration, data.Cold)
+		}
 
 		logger.Info("recorded scale-up from manager",
 			zap.String("function", data.FunctionName),
@@ -404,7 +411,9 @@ func main() {
 		timestamp := time.Unix(0, data.Timestamp)
 		duration := time.Duration(data.Duration)
 
-		tracker.RecordScaleDown(data.FunctionName, timestamp, duration)
+		if r.CallgraphEnabled(data.FunctionName) {
+			tracker.RecordScaleDown(data.FunctionName, timestamp, duration)
+		}
 
 		logger.Info("recorded scale-down from manager",
 			zap.String("function", data.FunctionName),
@@ -438,7 +447,9 @@ func main() {
 			return
 		}
 
-		tracker.ResetFunctionStats(data.FunctionName)
+		if r.CallgraphEnabled(data.FunctionName) {
+			tracker.ResetFunctionStats(data.FunctionName)
+		}
 
 		logger.Info("reset function stats for redeployment",
 			zap.String("function", data.FunctionName))

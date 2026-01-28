@@ -19,8 +19,9 @@ import (
 )
 
 type Route struct {
-	ips      []string
-	isActive bool
+	ips              []string
+	isActive         bool
+	callgraphEnabled bool
 }
 
 type RProxy struct {
@@ -107,7 +108,26 @@ func (r *RProxy) SetAutoScalerEnabled(enabled bool) {
 	r.autoscalerEnabled = enabled
 }
 
-func (r *RProxy) Add(name string, ips []string) error {
+// CallgraphEnabled returns whether callgraph tracking is enabled for a given function,
+func (r *RProxy) CallgraphEnabled(functionName string) bool {
+	if r.tracker == nil || !r.tracker.Enabled() {
+		return false
+	}
+	if strings.TrimSpace(functionName) == "" {
+		return false
+	}
+
+	r.routingTableMux.RLock()
+	route, ok := r.routingTable[functionName]
+	r.routingTableMux.RUnlock()
+	if !ok {
+		// If we don't have routing state (e.g., early startup), fall back to global enablement.
+		return true
+	}
+	return route.callgraphEnabled
+}
+
+func (r *RProxy) Add(name string, ips []string, labels map[string]string) error {
 	if len(ips) == 0 {
 		return fmt.Errorf("no ips given")
 	}
@@ -116,9 +136,12 @@ func (r *RProxy) Add(name string, ips []string) error {
 	r.routingTableMux.Lock()
 	defer r.routingTableMux.Unlock()
 
+	callgraphEnabled := callgraph.ParseCallgraphConfig(labels, "tinyfaas", r.tracker)
+
 	r.routingTable[name] = &Route{
-		ips:      ips,
-		isActive: true,
+		ips:              ips,
+		isActive:         true,
+		callgraphEnabled: callgraphEnabled,
 	}
 	for _, ip := range ips {
 		r.reverseRoutingTable[ip] = name
@@ -188,11 +211,9 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 		}
 	}
 
-	// Record the edge (this will calculate edge time if caller exists)
-	r.tracker.RecordEdge(caller, name, requestID, startTime)
-
 	r.routingTableMux.RLock()
-	route, ok := r.routingTable[name]
+	calleeRoute, ok := r.routingTable[name]
+	callerRoute, callerRouteOK := r.routingTable[caller]
 	r.routingTableMux.RUnlock()
 
 	if !ok {
@@ -200,10 +221,20 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 		return http.StatusNotFound, nil
 	}
 
-	r.logger.Debug("found function route", zap.Strings("ips", route.ips), zap.Bool("active", route.isActive))
+	r.logger.Debug("found function route", zap.Strings("ips", calleeRoute.ips), zap.Bool("active", calleeRoute.isActive))
+
+	// Record the edge (this will calculate edge time if caller exists and callgraph is enabled for both sides)
+	if calleeRoute.callgraphEnabled {
+		effectiveCaller := ""
+		// If caller's callgraph is disabled but callee is enabled, record as external (caller="")
+		if caller != "" && callerRouteOK && callerRoute.callgraphEnabled {
+			effectiveCaller = caller
+		}
+		r.tracker.RecordEdge(effectiveCaller, name, requestID, startTime)
+	}
 
 	// Check if function is scaled down and trigger cold start if needed
-	if r.autoscalerEnabled && !route.isActive {
+	if r.autoscalerEnabled && !calleeRoute.isActive {
 		r.logger.Info("function is scaled down, triggering cold start", zap.String("name", name))
 		// cold=true since this is triggered by a user request
 		// Manager will measure and record the cold start time
@@ -217,7 +248,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	r.queueHeartbeat(name)
 
 	// choose random handler
-	ip, err := route.PickIP()
+	ip, err := calleeRoute.PickIP()
 
 	if err != nil {
 		r.logger.Error("failed to pick function ip", zap.Error(err))
@@ -228,13 +259,17 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 
 	// Trigger prewarming for downstream functions (fire-and-forget, non-blocking)
 	// Prewarming requires both callgraph and autoscaler to be enabled
-	if r.tracker.Enabled() && r.autoscalerEnabled {
+	if calleeRoute.callgraphEnabled && r.autoscalerEnabled {
 		go r.prewarmDownstream(name)
 	}
 
 	// Mark that this function is starting execution
+	startedExecution := false
 	functionStartTime := time.Now()
-	r.tracker.StartExecution(name, requestID, functionStartTime)
+	if calleeRoute.callgraphEnabled {
+		r.tracker.StartExecution(name, requestID, functionStartTime)
+		startedExecution = true
+	}
 
 	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8000/fn", ip), bytes.NewBuffer(payload))
 	if err != nil {
@@ -253,7 +288,9 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 			}
 			resp.Body.Close()
 			// Clean up execution context after async call completes
-			r.tracker.EndExecution(name, requestID, time.Now())
+			if startedExecution {
+				r.tracker.EndExecution(name, requestID, time.Now())
+			}
 		}()
 		return http.StatusAccepted, nil
 	}
@@ -274,7 +311,9 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	}
 
 	// End execution - records function stats and cleans up context
-	r.tracker.EndExecution(name, requestID, time.Now())
+	if startedExecution {
+		r.tracker.EndExecution(name, requestID, time.Now())
+	}
 
 	return resp.StatusCode, res_body
 }
@@ -312,6 +351,11 @@ func (r *RProxy) prewarmDownstream(functionName string) {
 // It calculates the delay based on lead time and cold start estimates,
 // ensuring the function is ready just in time for when it's needed.
 func (r *RProxy) schedulePrewarm(caller string, target callgraph.PrewarmTarget) {
+	// Respect per-function callgraph enablement: if target is disabled, skip prewarming it.
+	if !r.CallgraphEnabled(target.FunctionName) {
+		return
+	}
+
 	// Check if the function is currently scaled down
 	r.routingTableMux.RLock()
 	route, exists := r.routingTable[target.FunctionName]
