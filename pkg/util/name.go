@@ -19,3 +19,10 @@ func IsValidFunctionName(s string) bool {
 
 	return reg.MatchString(s)
 }
+
+func GetShortID(id string) string {
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:12]
+}
