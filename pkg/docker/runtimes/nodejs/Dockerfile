@@ -4,8 +4,10 @@ EXPOSE 8000
 
 WORKDIR /usr/src/app
 
-COPY fn fn
+COPY fn/package.json fn/package.json
 
-RUN npm install ./fn
+RUN pnpm add ./fn
+
+COPY fn fn
 
 CMD [ "node", "index.js" ]

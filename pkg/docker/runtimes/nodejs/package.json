@@ -2,5 +2,9 @@
   "name": "function",
   "version": "1.0.0",
   "type": "module",
-  "main": "index.js"
+  "main": "index.js",
+  "packageManager": "pnpm@10.28.2",
+  "dependencies": {
+    "express": "5.2.1"
+  }
 }

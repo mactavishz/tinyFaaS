@@ -7,8 +7,10 @@ FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
 # Create app directory
 WORKDIR /usr/src/app
 
-COPY index.js .
+RUN npm install -g pnpm@10.28.2
+
 COPY package.json .
 
-RUN npm install express@5 && \
-    npm cache clean --force
+RUN pnpm install --prod
+
+COPY index.js .
