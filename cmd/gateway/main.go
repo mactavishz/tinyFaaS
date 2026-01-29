@@ -49,7 +49,7 @@ func main() {
 	mux := http.NewServeMux()
 	g.RegisterHandlers(mux)
 
-	addr := fmt.Sprintf(":%s", port)
+	addr := fmt.Sprintf("0.0.0.0:%s", port)
 
 	server := &http.Server{
 		Addr:    addr,
