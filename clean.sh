@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 TF_TAG="tinyFaaS"
 TMP_DIR="tmp"

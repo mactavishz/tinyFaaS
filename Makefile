@@ -120,17 +120,17 @@ rebuild-runtime-images: clean-runtime-images build-runtime-images
 .PHONY: install
 install: clean-runtimes build build-runtime-images
 	@echo "Installing binaries to $(BINDIR)..."
-	install -d $(BINDIR)
-	install -m 755 tf-manager-$(OS)-$(ARCH) $(BINDIR)/tf-manager
-	install -m 755 tf-rproxy-$(OS)-$(ARCH) $(BINDIR)/tf-rproxy
-	install -m 755 tf-gateway-$(OS)-$(ARCH) $(BINDIR)/tf-gateway
+	sudo install -d $(BINDIR)
+	sudo install -m 755 tf-manager-$(OS)-$(ARCH) $(BINDIR)/tf-manager
+	sudo install -m 755 tf-rproxy-$(OS)-$(ARCH) $(BINDIR)/tf-rproxy
+	sudo install -m 755 tf-gateway-$(OS)-$(ARCH) $(BINDIR)/tf-gateway
 	@echo "Creating working directory..."
-	install -d /var/lib/tinyfaas
+	sudo install -d /var/lib/tinyfaas
 	@echo "Installing systemd service files to $(SYSTEMD_DIR)..."
-	install -d $(SYSTEMD_DIR)
-	install -m 644 systemd/tf-rproxy.service $(SYSTEMD_DIR)/
-	install -m 644 systemd/tf-manager.service $(SYSTEMD_DIR)/
-	install -m 644 systemd/tf-gateway.service $(SYSTEMD_DIR)/
+	sudo install -d $(SYSTEMD_DIR)
+	sudo install -m 644 systemd/tf-rproxy.service $(SYSTEMD_DIR)/
+	sudo install -m 644 systemd/tf-manager.service $(SYSTEMD_DIR)/
+	sudo install -m 644 systemd/tf-gateway.service $(SYSTEMD_DIR)/
 	@echo ""
 	@echo "Installation complete. To enable and start the services:"
 	@echo "  sudo systemctl daemon-reload"
@@ -139,14 +139,18 @@ install: clean-runtimes build build-runtime-images
 
 .PHONY: uninstall
 uninstall:
-	@echo "Stopping services..."
-	-systemctl stop tf-manager tf-rproxy tf-gateway 2>/dev/null || true
-	-systemctl disable tf-manager tf-rproxy tf-gateway 2>/dev/null || true
 	@echo "Removing binaries and service files..."
-	rm -f $(BINDIR)/tf-manager $(BINDIR)/tf-rproxy $(BINDIR)/tf-gateway
-	rm -f $(SYSTEMD_DIR)/tf-manager.service $(SYSTEMD_DIR)/tf-rproxy.service $(SYSTEMD_DIR)/tf-gateway.service
-	systemctl daemon-reload
+	sudo rm -f $(BINDIR)/tf-manager $(BINDIR)/tf-rproxy $(BINDIR)/tf-gateway
+	sudo rm -f $(SYSTEMD_DIR)/tf-manager.service $(SYSTEMD_DIR)/tf-rproxy.service $(SYSTEMD_DIR)/tf-gateway.service
 	@echo "Uninstall complete"
+
+.PHONY: up
+up:
+	./up.sh
+
+.PHONY: down
+down:
+	./down.sh
 
 .PHONY: debug
 debug:
