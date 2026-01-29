@@ -197,6 +197,10 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 		requestID = fmt.Sprintf("unknown-%s", uuid.New().String())
 	}
 
+	callerExecutionID := header.Get("X-Tinyfaas-Execution-Id")
+	calleeExecutionID := uuid.New().String()
+	header.Set("X-Tinyfaas-Execution-Id", calleeExecutionID)
+
 	// Extract source IP to detect if this is an internal call
 	sourceIP := header.Get("X-Faas-Source-Ip")
 	caller := ""
@@ -230,7 +234,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 		if caller != "" && callerRouteOK && callerRoute.callgraphEnabled {
 			effectiveCaller = caller
 		}
-		r.tracker.RecordEdge(effectiveCaller, name, requestID, startTime)
+		r.tracker.RecordEdge(effectiveCaller, name, requestID, callerExecutionID, startTime)
 	}
 
 	// Check if function is scaled down and trigger cold start if needed
@@ -267,7 +271,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	startedExecution := false
 	functionStartTime := time.Now()
 	if calleeRoute.callgraphEnabled {
-		r.tracker.StartExecution(name, requestID, functionStartTime)
+		r.tracker.StartExecution(name, requestID, calleeExecutionID, functionStartTime)
 		startedExecution = true
 	}
 
@@ -289,7 +293,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 			resp.Body.Close()
 			// Clean up execution context after async call completes
 			if startedExecution {
-				r.tracker.EndExecution(name, requestID, time.Now())
+				r.tracker.EndExecution(name, requestID, calleeExecutionID, time.Now())
 			}
 		}()
 		return http.StatusAccepted, nil
@@ -312,7 +316,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 
 	// End execution - records function stats and cleans up context
 	if startedExecution {
-		r.tracker.EndExecution(name, requestID, time.Now())
+		r.tracker.EndExecution(name, requestID, calleeExecutionID, time.Now())
 	}
 
 	return resp.StatusCode, res_body
