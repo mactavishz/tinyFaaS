@@ -365,7 +365,8 @@ func (dh *dockerHandler) Start() error {
 	// Retry entire start process up to 10 times
 	err := retry.New(
 		retry.Attempts(10),
-		retry.Delay(200*time.Millisecond),
+		retry.Delay(50*time.Millisecond),
+		retry.DelayType(retry.FixedDelay),
 		retry.OnRetry(func(attempt uint, err error) {
 			dh.logger.Debug("start attempt failed", zap.Uint("attempt", attempt))
 		}),
@@ -466,14 +467,15 @@ func (dh *dockerHandler) Start() error {
 				dh.logger.Info("waiting for container to be ready", zap.String("ip", cip))
 
 				err := retry.New(
-					retry.Attempts(10),
-					retry.Delay(200*time.Millisecond),
+					retry.Attempts(50),
+					retry.DelayType(retry.FixedDelay),
+					retry.Delay(50*time.Millisecond),
 					retry.OnRetry(func(retryAttempt uint, err error) {
-						dh.logger.Debug("health check attempt failed", zap.Uint("attempt", retryAttempt), zap.String("ip", cip))
+						dh.logger.Debug("ready check attempt failed", zap.Uint("attempt", retryAttempt), zap.String("ip", cip))
 					}),
 				).Do(func() error {
 					client := http.Client{
-						Timeout: 3 * time.Second,
+						Timeout: 1 * time.Second,
 					}
 					resp, err := client.Get("http://" + cip + ":8000/health")
 					if err != nil {
