@@ -23,20 +23,14 @@ help:
 	@echo ""
 	@echo "Main targets:"
 	@echo "  make build                  - Build tf-manager and tf-rproxy binaries"
-	@echo "  make start                  - Show commands to start services"
+	@echo "  make install                - Build binaries and install systemd services"
+	@echo "  make up                     - (Re)Start tinyFaaS services using systemd (after install)"
+	@echo "  make down                   - Stop tinyFaaS services using systemd"
 	@echo "  make unit-test              - Run unit tests"
 	@echo "  make integration-test       - Run integration tests"
-	@echo "  make clean                  - Clean build artifacts (preserves embedded runtime files)"
-	@echo "  make install                - Install binaries and systemd services"
-	@echo ""
-	@echo "Runtime management:"
+	@echo "  make clean                  - Clean build artifacts"
+	@echo "  make clean-all              - Clean all build artifacts and runtime files and images"
 	@echo "  make build-runtime-images   - Pre-build all runtime base images (optional)"
-	@echo "  make rebuild-runtime-images - Force rebuild all runtime base images"
-	@echo "  make clean-runtime-images   - Remove runtime base images from Docker"
-	@echo "  make clean-runtimes         - Clean embedded runtime files (forces re-copy on build)"
-	@echo ""
-	@echo "IMPORTANT: Runtime base images must be pre-built before starting manager."
-	@echo "           Run 'make build-runtime-images' or 'make install' first."
 
 .PHONY: bin-name
 bin-name:
@@ -53,16 +47,6 @@ build-rproxy: tf-rproxy-${OS}-${ARCH}
 
 .PHONY: build-gateway
 build-gateway: tf-gateway-${OS}-${ARCH}
-
-.PHONY: start
-start: build
-	@echo "Starting tinyFaaS services..."
-	@echo "First, ensure runtime base images are built:"
-	@echo "  make build-runtime-images"
-	@echo ""
-	@echo "Then start services (rproxy first, then manager):"
-	@echo "  ./tf-rproxy-$(OS)-$(ARCH) 127.0.0.1:8081 http:127.0.0.1:8000"
-	@echo "  ./tf-manager-$(OS)-$(ARCH)"
 
 .PHONY: unit-test
 unit-test:
@@ -84,15 +68,16 @@ clean:
 	@echo "Running additional clean-up script..."
 	./clean.sh
 	@echo "Clean complete (runtime blobs preserved)"
-	@echo "To also clean runtime blobs, run: make clean-runtimes"
 
-.PHONY: clean-runtimes
-clean-runtimes:
+.PHONY: clean-all
+clean-all:
+	make clean
 	@echo "Cleaning embedded runtime files..."
 	rm -rf pkg/docker/runtimes-amd64
 	rm -rf pkg/docker/runtimes-arm
 	rm -rf pkg/docker/runtimes-arm64
-	@echo "Embedded runtime files cleaned"
+	@echo "Cleaning runtime base images from Docker..."
+	docker images --filter "label=tinyfaas-type=base-image" -q | xargs -r docker rmi -f 2>/dev/null || true
 
 .PHONY: build-runtime-images
 build-runtime-images:
@@ -107,18 +92,8 @@ build-runtime-images:
 	done
 	@echo "All runtime base images built successfully"
 
-.PHONY: clean-runtime-images
-clean-runtime-images:
-	@echo "Removing runtime base images from Docker..."
-	@docker images --filter "label=tinyfaas-type=base-image" -q | xargs -r docker rmi -f 2>/dev/null || true
-	@echo "Runtime base images removed"
-
-.PHONY: rebuild-runtime-images
-rebuild-runtime-images: clean-runtime-images build-runtime-images
-	@echo "Runtime images rebuilt"
-
 .PHONY: install
-install: clean-runtimes build build-runtime-images
+install: clean-all build build-runtime-images
 	@echo "Installing binaries to $(BINDIR)..."
 	sudo install -d $(BINDIR)
 	sudo install -m 755 tf-manager-$(OS)-$(ARCH) $(BINDIR)/tf-manager
