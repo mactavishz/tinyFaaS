@@ -1,10 +1,9 @@
-ARG GO_VERSION=1.25.5
-ARG ALPINE_VERSION=3.23
+ARG GO_VERSION=1.26
 
 # Build stage - compile the runtime handler
-FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
+FROM golang:${GO_VERSION}-bookworm AS builder
 ENV CGO_ENABLED=1
-RUN apk add build-base binutils-gold
+RUN apt-get update && apt-get install -y build-essential binutils
 
 WORKDIR /usr/src/build
 COPY main.go .

@@ -1,13 +1,12 @@
-ARG GO_VERSION=1.25.5
-ARG ALPINE_VERSION=3.23
+ARG GO_VERSION=1.26
 
-FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
+FROM golang:${GO_VERSION}-bookworm AS builder
 
 WORKDIR /usr/src/build
 COPY main.go .
 RUN GO111MODULE=off CGO_ENABLED=0 go build -o runtime.bin .
 
-FROM alpine:${ALPINE_VERSION}
+FROM debian:bookworm-slim
 
 # Create app directory
 WORKDIR /usr/src/app

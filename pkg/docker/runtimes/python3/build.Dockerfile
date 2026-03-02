@@ -1,7 +1,6 @@
-ARG PYTHON_VERSION=3.14.1
-ARG ALPINE_VERSION=3.23
+ARG PYTHON_VERSION=3.14
 
-FROM python:${PYTHON_VERSION}-alpine${ALPINE_VERSION}
+FROM python:${PYTHON_VERSION}-slim-bookworm
 
 # Create app directory
 WORKDIR /usr/src/app

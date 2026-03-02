@@ -1,8 +1,7 @@
 #https://nodejs.org/en/docs/guides/nodejs-docker-webapp/
-ARG NODE_VERSION=24.13
-ARG ALPINE_VERSION=3.23
+ARG NODE_VERSION=24
 
-FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
+FROM node:${NODE_VERSION}-bookworm-slim
 
 # Create app directory
 WORKDIR /usr/src/app
