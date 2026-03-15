@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -37,6 +38,12 @@ func main() {
 	mode := util.GetEnvOrDefault("TF_ENV", DEFAULT_MODE)
 	logger.Info("RProxy ENV", zap.String("env", mode))
 	r := rproxy.New(logger, mode)
+
+	// Configure gateway address for heartbeat and scale-up requests
+	gatewayPort := util.GetEnvOrDefault("TF_GATEWAY_PORT", "80")
+	gatewayAddr := fmt.Sprintf("127.0.0.1:%s", gatewayPort)
+	r.SetGatewayAddr(gatewayAddr)
+	logger.Info("gateway address configured", zap.String("gateway", gatewayAddr))
 
 	// Initialize autoscaler for activity tracking
 	autoscalerConfig, err := autoscaler.NewConfigFromEnv("tinyfaas")

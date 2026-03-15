@@ -32,6 +32,8 @@ type RProxy struct {
 	autoscalerEnabled   bool
 	tracker             callgraph.FullTracker
 	logger              *zap.Logger
+	// gatewayAddr is the host:port of the gateway used for heartbeat and scale-up requests
+	gatewayAddr string
 	// Shared HTTP client for internal requests (heartbeat, scale-up)
 	// Configured with connection pooling for efficient local communication
 	httpClient *http.Client
@@ -106,6 +108,10 @@ func (r *RProxy) SetTracker(tracker callgraph.FullTracker) {
 
 func (r *RProxy) SetAutoScalerEnabled(enabled bool) {
 	r.autoscalerEnabled = enabled
+}
+
+func (r *RProxy) SetGatewayAddr(addr string) {
+	r.gatewayAddr = addr
 }
 
 // CallgraphEnabled returns whether callgraph tracking is enabled for a given function,
@@ -507,7 +513,7 @@ func (r *RProxy) flushHeartbeats() {
 
 // sendBatchHeartbeat sends a batch heartbeat request to the manager.
 func (r *RProxy) sendBatchHeartbeat(functions []string) error {
-	url := "http://127.0.0.1/system/heartbeat"
+	url := fmt.Sprintf("http://%s/system/heartbeat", r.gatewayAddr)
 
 	reqData := struct {
 		Functions []string `json:"functions"`
@@ -556,7 +562,7 @@ func (r *RProxy) sendBatchHeartbeat(functions []string) error {
 // cold=true means this is a user-facing cold start
 // cold=false means this is a proactive prewarm
 func (r *RProxy) scaleUpFunction(name string, cold bool) error {
-	url := "http://127.0.0.1/system/scale-up"
+	url := fmt.Sprintf("http://%s/system/scale-up", r.gatewayAddr)
 
 	reqData := struct {
 		FunctionName string `json:"name"`
