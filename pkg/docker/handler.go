@@ -63,6 +63,7 @@ type DockerBackend struct {
 	tinyFaaSID   string
 	gatewayIP    string // host gateway IP for --add-host (where Caddy runs)
 	publicDomain string // public domain for --add-host (e.g., tinyfaas.com)
+	gatewayPort  string // gateway port injected into containers as TINYFAAS_GATEWAY_URL
 	logger       *zap.Logger
 }
 
@@ -95,6 +96,13 @@ func New(tinyFaaSID string, logger *zap.Logger) *DockerBackend {
 		// On Linux, this might need to be set explicitly to the host IP
 		db.gatewayIP = "host-gateway"
 		logger.Info("TINYFAAS_GATEWAY_IP not set, using default", zap.String("gatewayIP", db.gatewayIP))
+	}
+
+	// Get gateway port from environment variable (same var used by the gateway service)
+	db.gatewayPort = os.Getenv("TF_GATEWAY_PORT")
+	if db.gatewayPort == "" {
+		db.gatewayPort = "80"
+		logger.Info("TF_GATEWAY_PORT not set, using default", zap.String("gatewayPort", db.gatewayPort))
 	}
 
 	// Note: Runtime base images must be pre-built using 'make build-runtime-images'
@@ -275,6 +283,11 @@ func (db *DockerBackend) Create(name string, env string, replicas int, filedir s
 	for k, v := range envs {
 		e = append(e, fmt.Sprintf("%s=%s", k, v))
 	}
+
+	// Inject the full gateway URL so function handlers can call other functions
+	// regardless of the port the gateway is running on.
+	gatewayURL := fmt.Sprintf("http://%s:%s", db.publicDomain, db.gatewayPort)
+	e = append(e, fmt.Sprintf("TINYFAAS_GATEWAY_URL=%s", gatewayURL))
 
 	// Build extra hosts for --add-host
 	// This maps the public domain to the host gateway (where Caddy is running)
