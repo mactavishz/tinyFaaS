@@ -186,10 +186,18 @@ func (r *RProxy) Update(name string) error {
 	r.routingTableMux.Lock()
 	defer r.routingTableMux.Unlock()
 
-	if _, ok := r.routingTable[name]; ok {
-		r.logger.Debug("updating function route", zap.String("name", name))
-		r.routingTable[name].isActive = !r.routingTable[name].isActive
+	route, ok := r.routingTable[name]
+	if !ok {
+		return nil
 	}
+
+	r.logger.Debug("deactivating function route", zap.String("name", name))
+	for _, ip := range route.ips {
+		delete(r.reverseRoutingTable, ip)
+	}
+	route.ips = nil
+	route.isActive = false
+
 	return nil
 }
 
@@ -251,8 +259,25 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 		err := r.scaleUpFunction(name, true)
 		if err != nil {
 			r.logger.Error("failed to trigger cold start", zap.String("name", name), zap.Error(err))
-			return http.StatusInternalServerError, nil
+			return http.StatusServiceUnavailable, nil
 		}
+
+		r.routingTableMux.RLock()
+		updatedRoute, exists := r.routingTable[name]
+		r.routingTableMux.RUnlock()
+		if !exists {
+			r.logger.Error("function route disappeared after scale-up", zap.String("name", name))
+			return http.StatusServiceUnavailable, nil
+		}
+		calleeRoute = updatedRoute
+	}
+
+	if !calleeRoute.isActive || len(calleeRoute.ips) == 0 {
+		r.logger.Warn("function route not ready for invocation",
+			zap.String("name", name),
+			zap.Bool("active", calleeRoute.isActive),
+			zap.Int("ipCount", len(calleeRoute.ips)))
+		return http.StatusServiceUnavailable, nil
 	}
 
 	r.queueHeartbeat(name)
@@ -607,6 +632,8 @@ func (r *RProxy) scaleUpFunction(name string, cold bool) error {
 	)
 	if err != nil {
 		r.logger.Error("failed to scale up the function", zap.String("name", name), zap.Bool("cold", cold), zap.Error(err))
+		return err
 	}
+
 	return nil
 }
