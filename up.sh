@@ -10,16 +10,25 @@ make install
 
 echo "==> Configuring tinyFaaS environment..."
 
+# Set default values
+TF_AUTOSCALER_ENABLED=${TF_AUTOSCALER_ENABLED:-true}
+TF_CALLGRAPH_ENABLED=${TF_CALLGRAPH_ENABLED:-true}
+TF_DEFAULT_SCALE_TO_ZERO_IDLE_DURATION=${TF_DEFAULT_SCALE_TO_ZERO_IDLE_DURATION:-5m}
+TF_GATEWAY_IP=${TF_GATEWAY_IP:-0.0.0.0}
+TF_GATEWAY_PORT=${TF_GATEWAY_PORT:-80}
+TF_RPROXY_PORT=${TF_RPROXY_PORT:-8000}
+TF_MANAGER_PORT=${TF_MANAGER_PORT:-8080}
+TF_ENV=${TF_ENV:-development}
+
 # Load local config if exists (git-ignored)
 if [ -f ".tinyfaas.env" ]; then
     echo "==> Loading local configuration from .tinyfaas.env"
     source ".tinyfaas.env"
-else
-    echo "==> No local configuration file found, using default settings."
 fi
 
 echo "==> Autoscaler settings: ENABLED=$TF_AUTOSCALER_ENABLED, IDLE_DURATION=$TF_DEFAULT_SCALE_TO_ZERO_IDLE_DURATION"
 echo "==> Callgraph settings: ENABLED=$TF_CALLGRAPH_ENABLED"
+echo "==> Gateway IP: $TF_GATEWAY_IP"
 echo "==> Gateway port: $TF_GATEWAY_PORT"
 echo "==> Manager port: $TF_MANAGER_PORT"
 echo "==> RProxy port: $TF_RPROXY_PORT"
@@ -35,6 +44,7 @@ TF_DEFAULT_SCALE_TO_ZERO_IDLE_DURATION=$TF_DEFAULT_SCALE_TO_ZERO_IDLE_DURATION
 TF_CALLGRAPH_ENABLED=$TF_CALLGRAPH_ENABLED
 
 # Gateway configuration
+TF_GATEWAY_IP=$TF_GATEWAY_IP
 TF_GATEWAY_PORT=$TF_GATEWAY_PORT
 
 # RProxy configuration
