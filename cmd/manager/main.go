@@ -21,9 +21,17 @@ import (
 )
 
 var (
-	ManagerPort = util.GetEnvOrDefault("MANAGER_PORT", "8080")
-	RProxyPort  = util.GetEnvOrDefault("RPROXY_PORT", "8000")
+	ManagerPort = getManagerPort()
+	RProxyPort  = getRProxyPort()
 )
+
+func getManagerPort() string {
+	return util.GetEnvOrDefault("TF_MANAGER_PORT", "8080")
+}
+
+func getRProxyPort() string {
+	return util.GetEnvOrDefault("TF_RPROXY_PORT", "8000")
+}
 
 type server struct {
 	ms     *manager.ManagementService
