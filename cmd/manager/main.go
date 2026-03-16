@@ -46,12 +46,8 @@ func main() {
 	id := uuid.New().String()
 
 	// find backend
-	backend, ok := os.LookupEnv("TF_BACKEND")
-
-	if !ok {
-		backend = "docker"
-		logger.Info("using default backend docker")
-	}
+	backend := util.GetEnvOrDefault("TF_BACKEND", "docker")
+	logger.Info("using runtime backend", zap.String("backend", backend))
 
 	var tfBackend manager.Backend
 	switch backend {
