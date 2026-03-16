@@ -15,6 +15,7 @@ import (
 )
 
 const (
+	DEFAULT_IP   = "0.0.0.0"
 	DEFAULT_PROT = "80"
 	DEFAULT_MODE = "development"
 )
@@ -23,11 +24,8 @@ func main() {
 	logger := util.CreateLogger()
 	defer logger.Sync() // flushes buffer, if any
 
-	port := os.Getenv("TF_GATEWAY_PORT")
-	if port == "" {
-		port = DEFAULT_PROT
-	}
-
+	port := util.GetEnvOrDefault("TF_GATEWAY_PORT", DEFAULT_PROT)
+	ip := util.GetEnvOrDefault("TF_GATEWAY_IP", DEFAULT_IP)
 	// Create gateway instance with options
 	var opts []gateway.Option
 
@@ -49,7 +47,7 @@ func main() {
 	mux := http.NewServeMux()
 	g.RegisterHandlers(mux)
 
-	addr := fmt.Sprintf("0.0.0.0:%s", port)
+	addr := fmt.Sprintf("%s:%s", ip, port)
 
 	server := &http.Server{
 		Addr:    addr,
