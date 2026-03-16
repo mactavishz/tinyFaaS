@@ -10,7 +10,6 @@ Restart=on-failure
 RestartSec=5s
 
 # Environment variables (can be overridden in /etc/default/tinyfaas)
-Environment="TF_GATEWAY_PORT=80"
 EnvironmentFile=-/etc/default/tinyfaas
 
 # Security settings

@@ -14,10 +14,6 @@ RestartSec=5
 # Environment variables (can be overridden in /etc/default/tinyfaas)
 EnvironmentFile=-/etc/default/tinyfaas
 
-# Default environment
-Environment=TF_BACKEND=docker
-Environment=TF_TMP_DIR=/var/lib/tinyfaas/tmp
-
 # Working directory
 WorkingDirectory=/var/lib/tinyfaas
 
