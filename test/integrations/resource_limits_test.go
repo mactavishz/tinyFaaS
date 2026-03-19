@@ -37,6 +37,7 @@ func TestResourceLimitsInList(t *testing.T) {
 	assert.Equal(t, "96Mi", fn.EffectiveLimits.Memory)
 	assert.Equal(t, int64(50_000_000), fn.EffectiveLimits.NanoCPUs)
 	assert.Equal(t, int64(96*1024*1024), fn.EffectiveLimits.MemoryBytes)
+	assert.Equal(t, 1, fn.Replicas)
 
 	require.True(t, fn.Running)
 }
