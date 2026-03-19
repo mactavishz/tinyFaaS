@@ -3,26 +3,20 @@ package docker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/moby/go-archive"
-	"github.com/moby/go-archive/compression"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 
-	"github.com/moby/moby/client/pkg/jsonmessage"
-	"github.com/moby/term"
+	"github.com/containerd/errdefs"
 	"go.uber.org/zap"
 
-	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 
 	retry "github.com/avast/retry-go/v5"
@@ -37,292 +31,28 @@ const (
 var RUNTIMES = []string{"binary", "go", "nodejs", "python3"}
 
 type dockerHandler struct {
-	name            string
-	env             string
-	replicas        int
-	nanoCPUs        int64
-	memoryBytes     int64
-	uniqueName      string
-	filePath        string
-	client          *client.Client
-	network         string // per-function network ID
-	networkName     string // per-function network name
-	containers      []string
-	handlerIPs      []string
-	isRunning       bool              // track if containers are running
-	opMux           sync.Mutex        // mutex for start/stop/restart operations
-	labels          map[string]string // store user-provided labels (for GetLabels())
-	containerLabels map[string]string // store merged labels (system + user) for container creation
-	envVars         []string          // store environment variables for container recreation
-	extraHosts      []string          // store extra hosts for container recreation
-	logger          *zap.Logger
-}
-
-type DockerBackend struct {
-	client       *client.Client
-	tinyFaaSID   string
-	gatewayIP    string // host gateway IP for --add-host (where Caddy runs)
-	publicDomain string // public domain for --add-host (e.g., tinyfaas.com)
-	gatewayPort  string // gateway port injected into containers as TINYFAAS_GATEWAY_URL
-	logger       *zap.Logger
-}
-
-func New(tinyFaaSID string, logger *zap.Logger) *DockerBackend {
-	// create docker client
-	client, err := client.New(client.FromEnv)
-	if err != nil {
-		logger.Fatal("error creating docker client", zap.Error(err))
-		return nil
-	}
-
-	db := &DockerBackend{
-		client:     client,
-		tinyFaaSID: tinyFaaSID,
-		logger:     logger,
-	}
-
-	// Get public domain from environment variable
-	db.publicDomain = os.Getenv("TINYFAAS_PUBLIC_DOMAIN")
-	if db.publicDomain == "" {
-		db.publicDomain = DEFAULT_PUBLIC_DOMAIN
-		logger.Info("TINYFAAS_PUBLIC_DOMAIN not set, using default", zap.String("publicDomain", db.publicDomain))
-	}
-
-	// Get gateway IP from environment variable
-	// This should be the host IP where Caddy is running
-	db.gatewayIP = os.Getenv("TINYFAAS_GATEWAY_IP")
-	if db.gatewayIP == "" {
-		// Default to host.docker.internal for Docker Desktop
-		// On Linux, this might need to be set explicitly to the host IP
-		db.gatewayIP = "host-gateway"
-		logger.Info("TINYFAAS_GATEWAY_IP not set, using default", zap.String("gatewayIP", db.gatewayIP))
-	}
-
-	// Get gateway port from environment variable (same var used by the gateway service)
-	db.gatewayPort = os.Getenv("TF_GATEWAY_PORT")
-	if db.gatewayPort == "" {
-		db.gatewayPort = "80"
-		logger.Info("TF_GATEWAY_PORT not set, using default", zap.String("gatewayPort", db.gatewayPort))
-	}
-
-	// Note: Runtime base images must be pre-built using 'make build-runtime-images'
-	// or the build script. Manager expects images to already exist.
-	logger.Info("verifying runtime base images...")
-
-	// Verify all runtime base images exist
-	if err := db.verifyRuntimeImages(); err != nil {
-		logger.Fatal("runtime base images not found, please run 'make build-runtime-images' first", zap.Error(err))
-		return nil
-	}
-
-	logger.Info("all runtime base images verified")
-	return db
-}
-
-// verifyRuntimeImages checks that all required runtime base images exist
-func (db *DockerBackend) verifyRuntimeImages() error {
-	var missing []string
-	for _, runtime := range RUNTIMES {
-		baseImageTag := db.getRuntimeBaseImage(runtime)
-		_, err := db.client.ImageInspect(context.Background(), baseImageTag)
-		if err != nil {
-			missing = append(missing, baseImageTag)
-		} else {
-			db.logger.Info("found runtime base image", zap.String("image", baseImageTag))
-		}
-	}
-
-	if len(missing) > 0 {
-		return fmt.Errorf("missing runtime images: %v", missing)
-	}
-
-	return nil
-}
-
-func (db *DockerBackend) Stop() error {
-	return nil
-}
-
-// getRuntimeBaseImage returns the tag for a runtime's base image
-// Assumes the image was pre-built and exists in Docker
-func (db *DockerBackend) getRuntimeBaseImage(runtime string) string {
-	return fmt.Sprintf("tinyfaas-runtime-%s", runtime)
-}
-
-func (db *DockerBackend) Create(name string, env string, replicas int, filedir string, envs map[string]string, labels map[string]string, limits manager.ResourceLimits) (manager.Handler, error) {
-
-	// make a unique function name by appending uuid string to function name
-	ctx := context.Background()
-	uuid, err := uuid.NewRandom()
-	if err != nil {
-		return nil, err
-	}
-
-	dh := &dockerHandler{
-		name:        name,
-		env:         env,
-		client:      db.client,
-		replicas:    replicas,
-		nanoCPUs:    limits.NanoCPUs,
-		memoryBytes: limits.MemoryBytes,
-		containers:  make([]string, 0, replicas),
-		handlerIPs:  make([]string, 0, replicas),
-		isRunning:   false,
-		labels:      labels,
-		logger:      db.logger,
-	}
-
-	dh.uniqueName = name + "-" + uuid.String()
-	db.logger.Info("creating function", zap.String("name", dh.name))
-
-	// Get runtime base image tag (verified at startup)
-	baseImageTag := db.getRuntimeBaseImage(dh.env)
-
-	// make a folder for the function
-	// mkdir <folder>
-	dh.filePath = path.Join(TmpDir, dh.uniqueName)
-
-	err = os.MkdirAll(dh.filePath, 0777)
-	if err != nil {
-		return nil, err
-	}
-
-	// Copy the runtime Dockerfile (already configured to use the base image)
-	dockerfilePath := path.Join(runtimesDir, dh.env, "Dockerfile")
-	dockerfileData, err := runtimes.ReadFile(dockerfilePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read runtime Dockerfile: %w", err)
-	}
-
-	err = os.WriteFile(path.Join(dh.filePath, "Dockerfile"), dockerfileData, 0644)
-	if err != nil {
-		return nil, err
-	}
-
-	db.logger.Info("Function runtime", zap.String("env", dh.env), zap.String("baseImage", baseImageTag))
-
-	// copy function into folder
-	// cp <file> <folder>/fn
-	err = os.MkdirAll(path.Join(dh.filePath, "fn"), 0777)
-	if err != nil {
-		return nil, err
-	}
-
-	err = util.CopyAll(filedir, path.Join(dh.filePath, "fn"))
-	if err != nil {
-		return nil, err
-	}
-
-	// build image (now just adding function layer on top of base)
-	// docker build -t <image> <folder>
-	tar, err := archive.Tar(dh.filePath, compression.None)
-	if err != nil {
-		return nil, err
-	}
-
-	db.logger.Info("building image", zap.String("name", dh.name))
-	r, err := db.client.ImageBuild(
-		ctx,
-		tar,
-		client.ImageBuildOptions{
-			Tags:       []string{dh.uniqueName},
-			Remove:     true,
-			Dockerfile: "Dockerfile",
-			Labels: map[string]string{
-				"tinyfaas-function": dh.name,
-				"tinyFaaS":          db.tinyFaaSID,
-			},
-		},
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	defer r.Body.Close()
-	// _, err = io.Copy(io.Discard, r.Body)
-	// if err != nil {
-	// }
-	termFd, isTerminal := term.GetFdInfo(os.Stdout)
-
-	// 4. Use jsonmessage to print progress AND catch errors
-	// This function blocks until the stream is closed (build finished)
-	err = jsonmessage.DisplayJSONMessagesStream(
-		r.Body,
-		os.Stdout,
-		termFd,
-		isTerminal,
-		nil, // auxCallback (optional: used to capture the final Image ID)
-	)
-
-	// Create per-function isolated network
-	// Each function gets its own network, so functions cannot directly communicate with each other
-	// They can only reach the host via the gateway
-	db.logger.Info("creating isolated network", zap.String("name", dh.name))
-	networkResp, err := db.client.NetworkCreate(
-		ctx,
-		dh.uniqueName,
-		client.NetworkCreateOptions{
-			Driver: "bridge",
-			// Enable isolation - containers can only access the gateway, not other networks
-			Internal: false, // Must be false to allow internet/host access
-			Labels: map[string]string{
-				"tinyfaas-function": dh.name,
-				"tinyFaaS":          db.tinyFaaSID,
-			},
-		},
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	dh.network = networkResp.ID
-	dh.networkName = dh.uniqueName
-
-	e := make([]string, 0, len(envs))
-
-	for k, v := range envs {
-		e = append(e, fmt.Sprintf("%s=%s", k, v))
-	}
-
-	// Inject the full gateway URL so function handlers can call other functions
-	// regardless of the port the gateway is running on.
-	gatewayURL := fmt.Sprintf("http://%s:%s", db.publicDomain, db.gatewayPort)
-	e = append(e, fmt.Sprintf("TINYFAAS_GATEWAY_URL=%s", gatewayURL))
-
-	// Build extra hosts for --add-host
-	// This maps the public domain to the host gateway (where Caddy is running)
-	// Using "host-gateway" is a special Docker value that resolves to the host's IP
-	extraHosts := []string{}
-	if db.publicDomain != "" && db.gatewayIP != "" {
-		extraHosts = append(extraHosts, fmt.Sprintf("%s:%s", db.publicDomain, db.gatewayIP))
-		db.logger.Info("adding extra host", zap.String("host", db.publicDomain), zap.String("ip", db.gatewayIP))
-	}
-
-	// Merge custom labels with system labels
-	containerLabels := map[string]string{
-		"tinyfaas-function": dh.name,
-		"tinyFaaS":          db.tinyFaaSID,
-	}
-	for k, v := range labels {
-		containerLabels[k] = v
-	}
-
-	// Store config for later container creation in Start()
-	dh.envVars = e
-	dh.extraHosts = extraHosts
-	dh.containerLabels = containerLabels
-
-	// NOTE: Containers are NOT created here - they will be created in Start()
-	// This ensures cold start measurement includes container creation time
-
-	// remove folder
-	// rm -rf <folder>
-	err = os.RemoveAll(dh.filePath)
-	if err != nil {
-		return nil, err
-	}
-	return dh, nil
-
+	name             string
+	env              string
+	replicas         int
+	nanoCPUs         int64
+	memoryBytes      int64
+	uniqueName       string
+	filePath         string
+	client           *client.Client
+	network          string // per-function network ID
+	networkName      string // per-function network name
+	containers       []string
+	handlerIPs       []string
+	isRunning        bool               // track if containers are running
+	opMux            sync.Mutex         // mutex for start/stop/restart operations
+	labels           map[string]string  // store user-provided labels (for GetLabels())
+	containerLabels  map[string]string  // store merged labels (system + user) for container creation
+	envVars          []string           // store environment variables for container recreation
+	extraHosts       []string           // store extra hosts for container recreation
+	containerRemover func(string) error // optional override for tests
+	networkRemover   func() error       // optional override for tests
+	imageRemover     func() error       // optional override for tests
+	logger           *zap.Logger
 }
 
 func (dh *dockerHandler) IPs() []string {
@@ -573,25 +303,10 @@ func (dh *dockerHandler) stopContainers() {
 
 // removeContainers stops and removes all function containers (used by scale-to-zero)
 // This frees up system resources by completely removing the containers
-func (dh *dockerHandler) removeContainers() {
-	wg := sync.WaitGroup{}
-	for _, c := range dh.containers {
-		wg.Add(1)
-		go func(cid string) {
-			defer wg.Done()
-
-			// _, err := dh.client.ContainerStop(
-			// 	context.Background(),
-			// 	cid,
-			// 	client.ContainerStopOptions{},
-			// )
-			// if err != nil {
-			// 	dh.logger.Error("error stopping container", zap.String("ID", util.GetShortID(cid)), zap.Error(err))
-			// } else {
-			// 	dh.logger.Info("stopped container")
-			// }
-
-			// Remove container
+func (dh *dockerHandler) removeContainers() error {
+	remove := dh.containerRemover
+	if remove == nil {
+		remove = func(cid string) error {
 			_, err := dh.client.ContainerRemove(
 				context.Background(),
 				cid,
@@ -600,16 +315,11 @@ func (dh *dockerHandler) removeContainers() {
 					Force:         true,
 				},
 			)
-			if err != nil {
-				dh.logger.Error("error removing container", zap.String("ID", util.GetShortID(cid)), zap.Error(err))
-			} else {
-				dh.logger.Info("removed container")
-			}
-		}(c)
+			return err
+		}
 	}
-	wg.Wait()
-	dh.handlerIPs = nil
-	dh.isRunning = false
+
+	return dh.cleanupContainers(remove)
 }
 
 func (dh *dockerHandler) Destroy() error {
@@ -617,71 +327,112 @@ func (dh *dockerHandler) Destroy() error {
 	defer dh.opMux.Unlock()
 	dh.logger.Info("destroying function", zap.String("name", dh.name))
 
-	wg := sync.WaitGroup{}
-	for _, cid := range dh.containers {
-		wg.Add(1)
-		go func(cid string) {
-			// dh.logger.Info("stopping container", zap.String("name", dh.name))
-
-			// _, err := dh.client.ContainerStop(
-			// 	context.Background(),
-			// 	cid,
-			// 	client.ContainerStopOptions{},
-			// )
-			// if err != nil {
-			// 	dh.logger.Error("error stopping container", zap.String("containerID", cid), zap.Error(err))
-			// }
-
-			// dh.logger.Info("container stopped", zap.String("name", dh.name))
-
-			_, err := dh.client.ContainerRemove(
-				context.Background(),
-				cid,
-				client.ContainerRemoveOptions{
-					RemoveVolumes: true,
-					Force:         true,
-				},
-			)
-			if err != nil {
-				dh.logger.Error("error removing container", zap.String("ID", util.GetShortID(cid)), zap.Error(err))
-			} else {
-				dh.logger.Info("container removed", zap.String("name", dh.name))
-			}
-			wg.Done()
-		}(cid)
-
+	var cleanupErrors []error
+	if err := dh.removeContainers(); err != nil {
+		cleanupErrors = append(cleanupErrors, err)
 	}
-	wg.Wait()
 
 	// Remove the per-function network
-	_, err := dh.client.NetworkRemove(
-		context.Background(),
-		dh.network,
-		client.NetworkRemoveOptions{},
-	)
-	if err != nil {
-		dh.logger.Error("error removing network", zap.String("network", util.GetShortID(dh.network)), zap.Error(err))
-	} else {
-		dh.logger.Info("network removed", zap.String("network", util.GetShortID(dh.network)))
+	if dh.network != "" {
+		networkRemove := dh.networkRemover
+		if networkRemove == nil {
+			networkRemove = func() error {
+				_, err := dh.client.NetworkRemove(
+					context.Background(),
+					dh.network,
+					client.NetworkRemoveOptions{},
+				)
+				return err
+			}
+		}
+
+		err := networkRemove()
+		if err != nil {
+			if isNotFoundError(err) {
+				dh.logger.Info("network already removed", zap.String("network", util.GetShortID(dh.network)))
+			} else {
+				dh.logger.Error("error removing network", zap.String("network", util.GetShortID(dh.network)), zap.Error(err))
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("network remove: %w", err))
+			}
+		} else {
+			dh.logger.Info("network removed", zap.String("network", util.GetShortID(dh.network)))
+		}
+		dh.network = ""
+		dh.networkName = ""
 	}
 
 	// remove image
 	// docker rmi <image>
-	_, err = dh.client.ImageRemove(
-		context.Background(),
-		dh.uniqueName,
-		client.ImageRemoveOptions{
-			Force:         true,
-			PruneChildren: true,
-		},
-	)
+	imageRemove := dh.imageRemover
+	if imageRemove == nil {
+		imageRemove = func() error {
+			_, err := dh.client.ImageRemove(
+				context.Background(),
+				dh.uniqueName,
+				client.ImageRemoveOptions{
+					Force:         true,
+					PruneChildren: true,
+				},
+			)
+			return err
+		}
+	}
+	err := imageRemove()
 
 	if err != nil {
-		return err
+		if isNotFoundError(err) {
+			dh.logger.Info("image already removed", zap.String("name", dh.name))
+		} else {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("image remove: %w", err))
+		}
+	} else {
+		dh.logger.Info("image removed", zap.String("name", dh.name))
 	}
 
-	dh.logger.Info("image removed", zap.String("name", dh.name))
+	if len(cleanupErrors) > 0 {
+		return fmt.Errorf("destroy cleanup failed: %w", errors.Join(cleanupErrors...))
+	}
+
 	return nil
+}
+
+func (dh *dockerHandler) cleanupContainers(removeFn func(string) error) error {
+	failedContainers := make([]string, 0)
+	cleanupErrors := make([]error, 0)
+
+	for _, cid := range dh.containers {
+		err := removeFn(cid)
+		if err != nil {
+			if isNotFoundError(err) {
+				dh.logger.Info("container already removed", zap.String("ID", util.GetShortID(cid)))
+				continue
+			}
+
+			dh.logger.Error("error removing container", zap.String("ID", util.GetShortID(cid)), zap.Error(err))
+			failedContainers = append(failedContainers, cid)
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("container %s: %w", util.GetShortID(cid), err))
+			continue
+		}
+
+		dh.logger.Info("container removed", zap.String("ID", util.GetShortID(cid)))
+	}
+
+	dh.containers = failedContainers
+	dh.handlerIPs = nil
+	dh.isRunning = false
+
+	if len(cleanupErrors) > 0 {
+		return fmt.Errorf("container cleanup failed: %w", errors.Join(cleanupErrors...))
+	}
+
+	return nil
+}
+
+func isNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errdefs.IsNotFound(err)
 }
 
 func (dh *dockerHandler) getContainerLogs(c string) (string, error) {
@@ -751,13 +502,15 @@ func (dh *dockerHandler) Stop() error {
 	dh.opMux.Lock()
 	defer dh.opMux.Unlock()
 
-	if !dh.isRunning {
+	if !dh.isRunning && len(dh.containers) == 0 {
 		dh.logger.Info("function is already stopped", zap.String("name", dh.name))
 		return nil
 	}
 
 	dh.logger.Info("removing function containers", zap.String("name", dh.name))
-	dh.removeContainers()
+	if err := dh.removeContainers(); err != nil {
+		return err
+	}
 	dh.logger.Info("function scaled down", zap.String("name", dh.name))
 	return nil
 }
