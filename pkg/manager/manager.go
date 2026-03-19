@@ -83,15 +83,15 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 
 	// create a new function handler
 
-	p := path.Join(TmpDir, uuid.String())
+	tempDir := path.Join(TmpDir, uuid.String())
 
-	err = os.MkdirAll(p, 0777)
+	err = os.MkdirAll(tempDir, 0777)
 
 	if err != nil {
 		return err
 	}
 
-	ms.logger.Info("created folder", zap.String("path", p))
+	ms.logger.Info("created folder", zap.String("path", tempDir))
 
 	// write zip to file
 	zipPath := path.Join(TmpDir, uuid.String()+".zip")
@@ -101,7 +101,7 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 		return err
 	}
 
-	err = util.Unzip(zipPath, p)
+	err = util.Unzip(zipPath, tempDir, ms.logger)
 
 	if err != nil {
 		return err
@@ -109,9 +109,9 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 
 	defer func() {
 		// remove folder
-		err = os.RemoveAll(p)
+		err = os.RemoveAll(tempDir)
 		if err != nil {
-			ms.logger.Error("error removing folder", zap.String("path", p), zap.Error(err))
+			ms.logger.Error("error removing folder", zap.String("path", tempDir), zap.Error(err))
 		}
 
 		err = os.Remove(zipPath)
@@ -119,11 +119,11 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 			ms.logger.Error("error removing zip", zap.String("path", zipPath), zap.Error(err))
 		}
 
-		ms.logger.Info("cleanup completed", zap.String("path", p), zap.String("zipPath", zipPath))
+		ms.logger.Info("cleanup completed", zap.String("path", tempDir), zap.String("zipPath", zipPath))
 	}()
 
 	if subfolderPath != "" {
-		p = path.Join(p, subfolderPath)
+		tempDir = path.Join(tempDir, subfolderPath)
 	}
 
 	resolvedLimits, effectiveLimits, backendLimits, err := EffectiveResourceLimits(resources.Limits)
@@ -139,7 +139,7 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 	ms.mux.Unlock()
 
 	// create new function handler (image build - not counted as cold start)
-	fh, err := ms.backend.Create(name, env, replicas, p, envs, labels, backendLimits)
+	fh, err := ms.backend.Create(name, env, replicas, tempDir, envs, labels, backendLimits)
 
 	if err != nil {
 		return err
