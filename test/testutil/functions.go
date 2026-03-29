@@ -2,11 +2,11 @@ package testutil
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
+	"mime/multipart"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -19,17 +19,14 @@ import (
 
 var nameRand = rand.New(rand.NewSource(time.Now().UnixNano()))
 
-
 type UploadPayload struct {
-	Name     string             `json:"name"`
-	Env      string             `json:"env"`
-	Replicas int                `json:"replicas"`
-	Zip      string             `json:"zip"`
-	Envs     []string           `json:"envs,omitempty"`
-	Labels   map[string]string  `json:"labels,omitempty"`
+	Name     string                     `json:"name"`
+	Env      string                     `json:"env"`
+	Replicas int                        `json:"replicas"`
+	Envs     []string                   `json:"envs,omitempty"`
+	Labels   map[string]string          `json:"labels,omitempty"`
 	Limits   *manager.FunctionResources `json:"limits,omitempty"`
 }
-
 
 func UniqueFunctionName(prefix string) string {
 	prefix = strings.ToLower(strings.TrimSpace(prefix))
@@ -48,41 +45,48 @@ func UniqueFunctionName(prefix string) string {
 	return name
 }
 
-func ZipBase64(t *testing.T, folder string) string {
-	t.Helper()
-	absPath, err := filepath.Abs(folder)
-	require.NoError(t, err, "failed to get absolute path for %s", folder)
-
-	zipData := ZipDirectory(t, absPath)
-	return base64.StdEncoding.EncodeToString(zipData)
-}
-
-func UploadFunction(t *testing.T, baseURL string, payload UploadPayload) {
+func UploadFunction(t *testing.T, baseURL string, payload UploadPayload, zipData []byte) {
 	t.Helper()
 
-	b, err := json.Marshal(payload)
-	require.NoError(t, err, "failed to marshal upload payload")
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	metadataPart, err := writer.CreateFormField("metadata")
+	require.NoError(t, err, "failed to create metadata part")
+	require.NoError(t, json.NewEncoder(metadataPart).Encode(payload), "failed to encode upload metadata")
+
+	zipPart, err := writer.CreateFormFile("zip", payload.Name+".zip")
+	require.NoError(t, err, "failed to create zip part")
+	_, err = zipPart.Write(zipData)
+	require.NoError(t, err, "failed to write zip payload")
+	require.NoError(t, writer.Close(), "failed to finalize multipart upload payload")
 
 	url := fmt.Sprintf("%s/system/upload", strings.TrimRight(baseURL, "/"))
-	resp, err := http.Post(url, "application/json", bytes.NewReader(b))
+	req, err := http.NewRequest(http.MethodPost, url, &body)
+	require.NoError(t, err, "failed to create upload request")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err, "failed to upload function %s", payload.Name)
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	require.Equal(t, http.StatusOK, resp.StatusCode, "upload failed: %s", string(body))
+	responseBody, _ := io.ReadAll(resp.Body)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "upload failed: %s", string(responseBody))
 }
 
 func UploadFixtureFunction(t *testing.T, baseURL string, fixtureDir string, name string, env string, replicas int, limits *manager.FunctionResources) {
 	t.Helper()
 
-	zip := ZipBase64(t, fixtureDir)
+	absPath, err := filepath.Abs(fixtureDir)
+	require.NoError(t, err, "failed to get absolute path for %s", fixtureDir)
+
+	zip := ZipDirectory(t, absPath)
 	UploadFunction(t, baseURL, UploadPayload{
 		Name:     name,
 		Env:      env,
 		Replicas: replicas,
-		Zip:      zip,
 		Limits:   limits,
-	})
+	}, zip)
 }
 
 func DeleteFunction(t *testing.T, baseURL string, name string) error {

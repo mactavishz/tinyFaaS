@@ -49,12 +49,12 @@ Please note that you cannot use tinyFaaS until the reverse proxy is running.
 
 To manage functions on tinyFaaS, use the included scripts included in `./src/scripts`.
 
-To upload a function, run `upload.sh {FOLDER} {NAME} {ENV} {THREADS}`, where `{FOLDER}` is the path to your function code, `{NAME}` is the name for your function, `{ENV}` is the environment you would like to use (`python3`, `nodejs`, or `binary`), and `{THREADS}` is a number specifying the number of function handlers for your function.
+To upload a function, run `upload.sh {FOLDER} {NAME} {ENV} {REPLICAS}`, where `{FOLDER}` is the path to your function code, `{NAME}` is the name for your function, `{ENV}` is the environment you would like to use (`python3`, `nodejs`, or `binary`), and `{REPLICAS}` is the desired number of function handlers for your function.
 For example, you might call `./scripts/upload.sh "./test/fns/sieve-of-eratosthenes" "sieve" "nodejs" 1` to upload the _sieve of Eratosthenes_ example function included in this repository.
-This requires the `zip`, `base64`, and `curl` utilities.
+This requires the `zip` and `curl` utilities.
 
 Alternatively, you can also upload functions from a zipped file available at some URL.
-Use the included script as a starting point: `uploadURL.sh {URL} {NAME} {ENV} {THREADS} {SUBFOLDER_PATH}`, where `{URL}` is the URL to a zip that has your function code, `{SUBFOLDER_PATH}` is the folder of the code within that zip (use `/` if the code is in the top-level), `{NAME}` is the name for your function, `{ENV}` is the environment, and `{THREADS}` is a number specifying the number of function handlers for your function.
+Use the included script as a starting point: `uploadURL.sh {URL} {SUBFOLDER_PATH} {NAME} {ENV} {REPLICAS}`, where `{URL}` is the URL to a zip that has your function code, `{SUBFOLDER_PATH}` is the folder of the code within that zip (use `/` if the code is in the top-level), `{NAME}` is the name for your function, `{ENV}` is the environment, and `{REPLICAS}` is the desired number of function handlers for your function.
 For example, you might call `uploadURL.sh "https://github.com/OpenFogStack/tinyFaas/archive/main.zip" "tinyFaaS-main/test/fns/sieve-of-eratosthenes" "sieve" "nodejs" 1` to upload the _sieve of Eratosthenes_ example function included in this repository.
 
 To get a list of existing functions, run `list.sh`.

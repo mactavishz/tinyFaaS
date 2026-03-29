@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# uploadURL.sh url subfolder name env threads
+# uploadURL.sh url subfolder name env replicas
 
 set -e
 
@@ -13,4 +13,6 @@ fi
 GATEWAY_HOST=${GATEWAY_HOST:-localhost}
 GATEWAY_PORT=${GATEWAY_PORT:-80}
 
-curl -X POST http://"${GATEWAY_HOST}":"${GATEWAY_PORT}"/system/uploadURL --data "{\"name\": \"$3\", \"env\": \"$4\",\"replicas\": $5,\"url\": \"$1\",\"subfolder_path\": \"$2\"}"
+curl -X POST http://"${GATEWAY_HOST}":"${GATEWAY_PORT}"/system/uploadURL \
+    -H "Content-Type: application/json" \
+    --data "{\"name\": \"$3\", \"env\": \"$4\",\"replicas\": $5,\"url\": \"$1\",\"subfolder_path\": \"$2\"}"

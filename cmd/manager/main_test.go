@@ -1,10 +1,125 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
 
+	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
+
+type mockManagementService struct {
+	uploadCalled      bool
+	uploadName        string
+	uploadEnv         string
+	uploadReplicas    int
+	uploadArchiveData []byte
+	uploadEnvs        map[string]string
+	uploadLabels      map[string]string
+	uploadResources   manager.FunctionResourceRequest
+	uploadErr         error
+}
+
+func (f *mockManagementService) UploadArchive(name string, env string, replicas int, archivePath string, envs map[string]string, labels map[string]string, resources manager.FunctionResourceRequest) error {
+	f.uploadCalled = true
+	f.uploadName = name
+	f.uploadEnv = env
+	f.uploadReplicas = replicas
+	f.uploadEnvs = envs
+	f.uploadLabels = labels
+	f.uploadResources = resources
+
+	archiveData, err := os.ReadFile(archivePath)
+	if err != nil {
+		return err
+	}
+	f.uploadArchiveData = archiveData
+
+	return f.uploadErr
+}
+
+func (f *mockManagementService) Delete(string) error {
+	return nil
+}
+
+func (f *mockManagementService) List() []manager.FunctionConfig {
+	return nil
+}
+
+func (f *mockManagementService) Wipe() error {
+	return nil
+}
+
+func (f *mockManagementService) Logs() (io.Reader, error) {
+	return bytes.NewReader(nil), nil
+}
+
+func (f *mockManagementService) LogsFunction(string) (io.Reader, error) {
+	return bytes.NewReader(nil), nil
+}
+
+func (f *mockManagementService) UrlUpload(string, string, int, string, string, map[string]string, map[string]string, manager.FunctionResourceRequest) error {
+	return nil
+}
+
+func (f *mockManagementService) ScaleUp(string, bool) error {
+	return nil
+}
+
+func (f *mockManagementService) Heartbeat(string) error {
+	return nil
+}
+
+func (f *mockManagementService) HeartbeatBatch([]string) error {
+	return nil
+}
+
+func newMultipartUploadRequest(t *testing.T, metadataBody []byte, zipBody []byte) *http.Request {
+	t.Helper()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	if metadataBody != nil {
+		metadataPart, err := writer.CreateFormField("metadata")
+		require.NoError(t, err)
+		_, err = metadataPart.Write(metadataBody)
+		require.NoError(t, err)
+	}
+
+	if zipBody != nil {
+		zipPart, err := writer.CreateFormFile("zip", "function.zip")
+		require.NoError(t, err)
+		_, err = zipPart.Write(zipBody)
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/upload", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	return req
+}
+
+func newTestServer(t *testing.T, ms managementService) *server {
+	t.Helper()
+
+	oldTmpDir := manager.TmpDir
+	manager.TmpDir = t.TempDir()
+	t.Cleanup(func() {
+		manager.TmpDir = oldTmpDir
+	})
+
+	return &server{ms: ms, logger: zap.NewNop()}
+}
 
 func TestGetManagerPort(t *testing.T) {
 	t.Run("uses TF_MANAGER_PORT when set", func(t *testing.T) {
@@ -28,4 +143,100 @@ func TestGetRProxyPort(t *testing.T) {
 		t.Setenv("TF_RPROXY_PORT", "")
 		assert.Equal(t, "8000", getRProxyPort())
 	})
+}
+
+func TestUploadHandlerMultipartSuccess(t *testing.T) {
+	limits := &manager.FunctionResources{CPU: "50m", Memory: "96Mi"}
+	metadata, err := json.Marshal(uploadMetadata{
+		FunctionName:     "echo",
+		FunctionEnv:      "python3",
+		FunctionReplicas: 2,
+		FunctionEnvs:     []string{"VALID=value", "invalid-env"},
+		Limits:           limits,
+	})
+	require.NoError(t, err)
+
+	fakeMS := &mockManagementService{}
+	s := newTestServer(t, fakeMS)
+	recorder := httptest.NewRecorder()
+
+	s.uploadHandler(recorder, newMultipartUploadRequest(t, metadata, []byte("zip-data")))
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.True(t, fakeMS.uploadCalled)
+	assert.Equal(t, "echo", fakeMS.uploadName)
+	assert.Equal(t, "python3", fakeMS.uploadEnv)
+	assert.Equal(t, 2, fakeMS.uploadReplicas)
+	assert.Equal(t, map[string]string{"VALID": "value"}, fakeMS.uploadEnvs)
+	assert.Equal(t, map[string]string{}, fakeMS.uploadLabels)
+	assert.Equal(t, limits, fakeMS.uploadResources.Limits)
+	assert.Equal(t, []byte("zip-data"), fakeMS.uploadArchiveData)
+	assert.Contains(t, recorder.Body.String(), "Function echo deployed")
+}
+
+func TestUploadHandlerMissingMetadata(t *testing.T) {
+	fakeMS := &mockManagementService{}
+	s := newTestServer(t, fakeMS)
+	recorder := httptest.NewRecorder()
+
+	s.uploadHandler(recorder, newMultipartUploadRequest(t, nil, []byte("zip-data")))
+
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.False(t, fakeMS.uploadCalled)
+	assert.Contains(t, recorder.Body.String(), "missing upload metadata")
+}
+
+func TestUploadHandlerMissingZip(t *testing.T) {
+	metadata, err := json.Marshal(uploadMetadata{FunctionName: "echo", FunctionEnv: "python3", FunctionReplicas: 1})
+	require.NoError(t, err)
+
+	fakeMS := &mockManagementService{}
+	s := newTestServer(t, fakeMS)
+	recorder := httptest.NewRecorder()
+
+	s.uploadHandler(recorder, newMultipartUploadRequest(t, metadata, nil))
+
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.False(t, fakeMS.uploadCalled)
+	assert.Contains(t, recorder.Body.String(), "missing upload zip file")
+}
+
+func TestUploadHandlerInvalidMetadata(t *testing.T) {
+	fakeMS := &mockManagementService{}
+	s := newTestServer(t, fakeMS)
+	recorder := httptest.NewRecorder()
+
+	s.uploadHandler(recorder, newMultipartUploadRequest(t, []byte("{"), []byte("zip-data")))
+
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.False(t, fakeMS.uploadCalled)
+	assert.Contains(t, recorder.Body.String(), "failed to decode upload metadata")
+}
+
+func TestUploadHandlerServiceError(t *testing.T) {
+	metadata, err := json.Marshal(uploadMetadata{FunctionName: "echo", FunctionEnv: "python3", FunctionReplicas: 1})
+	require.NoError(t, err)
+
+	fakeMS := &mockManagementService{uploadErr: assert.AnError}
+	s := newTestServer(t, fakeMS)
+	recorder := httptest.NewRecorder()
+
+	s.uploadHandler(recorder, newMultipartUploadRequest(t, metadata, []byte("zip-data")))
+
+	require.Equal(t, http.StatusInternalServerError, recorder.Code)
+	assert.True(t, fakeMS.uploadCalled)
+	assert.Contains(t, recorder.Body.String(), "failed to upload function")
+}
+
+func TestUploadHandlerRejectsInvalidMethod(t *testing.T) {
+	fakeMS := &mockManagementService{}
+	s := newTestServer(t, fakeMS)
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/upload", nil)
+
+	s.uploadHandler(recorder, req)
+
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.False(t, fakeMS.uploadCalled)
+	assert.Contains(t, recorder.Body.String(), "invalid method")
 }

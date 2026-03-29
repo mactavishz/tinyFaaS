@@ -2,7 +2,6 @@ package manager
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,7 +65,15 @@ func New(id string, rproxyPort string, tfBackend Backend, logger *zap.Logger) *M
 	return ms
 }
 
-func (ms *ManagementService) createFunction(name string, env string, replicas int, funczip []byte, subfolderPath string, envs map[string]string, labels map[string]string, resources FunctionResourceRequest) error {
+func createTempArchiveFile(prefix string) (*os.File, error) {
+	if err := os.MkdirAll(TmpDir, 0777); err != nil {
+		return nil, err
+	}
+
+	return os.CreateTemp(TmpDir, prefix+"-*.zip")
+}
+
+func (ms *ManagementService) createFunction(name string, env string, replicas int, archivePath string, subfolderPath string, envs map[string]string, labels map[string]string, resources FunctionResourceRequest) error {
 
 	// validate function name according to RFC 1035 DNS label rules
 	if !util.IsValidFunctionName(name) {
@@ -91,17 +98,9 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 		return err
 	}
 
-	ms.logger.Info("created folder", zap.String("path", tempDir))
+	ms.logger.Info("created folder", zap.String("path", tempDir), zap.String("archivePath", archivePath))
 
-	// write zip to file
-	zipPath := path.Join(TmpDir, uuid.String()+".zip")
-	err = os.WriteFile(zipPath, funczip, 0777)
-
-	if err != nil {
-		return err
-	}
-
-	err = util.Unzip(zipPath, tempDir, ms.logger)
+	err = util.Unzip(archivePath, tempDir, ms.logger)
 
 	if err != nil {
 		return err
@@ -114,12 +113,7 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 			ms.logger.Error("error removing folder", zap.String("path", tempDir), zap.Error(err))
 		}
 
-		err = os.Remove(zipPath)
-		if err != nil {
-			ms.logger.Error("error removing zip", zap.String("path", zipPath), zap.Error(err))
-		}
-
-		ms.logger.Info("cleanup completed", zap.String("path", tempDir), zap.String("zipPath", zipPath))
+		ms.logger.Info("cleanup completed", zap.String("path", tempDir), zap.String("archivePath", archivePath))
 	}()
 
 	if subfolderPath != "" {
@@ -386,17 +380,8 @@ func (ms *ManagementService) Delete(name string) error {
 	return nil
 }
 
-func (ms *ManagementService) Upload(name string, env string, threads int, zipped string, envs map[string]string, labels map[string]string, resources FunctionResourceRequest) error {
-
-	// b64 decode zip
-	zip, err := base64.StdEncoding.DecodeString(zipped)
-	if err != nil {
-		ms.logger.Error("error decoding base64 zip", zap.Error(err))
-		return err
-	}
-
-	// create function handler
-	err = ms.createFunction(name, env, threads, zip, "", envs, labels, resources)
+func (ms *ManagementService) UploadArchive(name string, env string, threads int, archivePath string, envs map[string]string, labels map[string]string, resources FunctionResourceRequest) error {
+	err := ms.createFunction(name, env, threads, archivePath, "", envs, labels, resources)
 
 	if err != nil {
 		ms.logger.Error("error creating function", zap.String("function", name), zap.Error(err))
@@ -416,18 +401,37 @@ func (ms *ManagementService) UrlUpload(name string, env string, replicas int, fu
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		ms.logger.Error("error downloading function zip", zap.String("url", funcurl), zap.Int("statusCode", resp.StatusCode))
+		return fmt.Errorf("unexpected status code downloading function zip: %d", resp.StatusCode)
+	}
 
-	// reading body to memory
-	// not the smartest thing
-	zip, err := io.ReadAll(resp.Body)
+	archiveFile, err := createTempArchiveFile("url-upload")
+	if err != nil {
+		ms.logger.Error("error creating temporary archive file", zap.String("url", funcurl), zap.Error(err))
+		return err
+	}
+	defer func() {
+		if err := os.Remove(archiveFile.Name()); err != nil && !os.IsNotExist(err) {
+			ms.logger.Error("error removing temporary archive file", zap.String("path", archiveFile.Name()), zap.Error(err))
+		}
+	}()
 
+	bytesWritten, err := io.Copy(archiveFile, resp.Body)
+	closeErr := archiveFile.Close()
 	if err != nil {
 		ms.logger.Error("error reading function zip", zap.String("url", funcurl), zap.Error(err))
 		return err
 	}
+	if closeErr != nil {
+		ms.logger.Error("error closing temporary archive file", zap.String("path", archiveFile.Name()), zap.Error(closeErr))
+		return closeErr
+	}
+
+	ms.logger.Info("downloaded function archive", zap.String("url", funcurl), zap.Int64("bytes", bytesWritten), zap.String("path", archiveFile.Name()))
 
 	// create function handler
-	err = ms.createFunction(name, env, replicas, zip, subfolder, envs, labels, resources)
+	err = ms.createFunction(name, env, replicas, archiveFile.Name(), subfolder, envs, labels, resources)
 
 	if err != nil {
 		ms.logger.Error("error creating function", zap.String("function", name), zap.Error(err))

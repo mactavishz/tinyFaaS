@@ -33,9 +33,71 @@ func getRProxyPort() string {
 	return util.GetEnvOrDefault("TF_RPROXY_PORT", "8000")
 }
 
+type managementService interface {
+	UploadArchive(name string, env string, replicas int, archivePath string, envs map[string]string, labels map[string]string, resources manager.FunctionResourceRequest) error
+	Delete(name string) error
+	List() []manager.FunctionConfig
+	Wipe() error
+	Logs() (io.Reader, error)
+	LogsFunction(name string) (io.Reader, error)
+	UrlUpload(name string, env string, replicas int, funcurl string, subfolder string, envs map[string]string, labels map[string]string, resources manager.FunctionResourceRequest) error
+	ScaleUp(functionName string, cold bool) error
+	Heartbeat(functionName string) error
+	HeartbeatBatch(functionNames []string) error
+}
+
+type uploadMetadata struct {
+	FunctionName     string                     `json:"name"`
+	FunctionEnv      string                     `json:"env"`
+	FunctionReplicas int                        `json:"replicas"`
+	FunctionEnvs     []string                   `json:"envs"`
+	FunctionLabels   map[string]string          `json:"labels"`
+	Limits           *manager.FunctionResources `json:"limits"`
+}
+
 type server struct {
-	ms     *manager.ManagementService
+	ms     managementService
 	logger *zap.Logger
+}
+
+func parseFunctionEnvs(functionEnvs []string, logger *zap.Logger) map[string]string {
+	envs := make(map[string]string)
+	for _, e := range functionEnvs {
+		k, v, ok := strings.Cut(e, "=")
+
+		if !ok {
+			logger.Warn("invalid env", zap.String("env", e))
+			continue
+		}
+
+		envs[k] = v
+	}
+
+	return envs
+}
+
+func (s *server) writeUploadArchive(src io.Reader) (string, int64, error) {
+	if err := os.MkdirAll(manager.TmpDir, 0777); err != nil {
+		return "", 0, err
+	}
+
+	archiveFile, err := os.CreateTemp(manager.TmpDir, "upload-*.zip")
+	if err != nil {
+		return "", 0, err
+	}
+
+	bytesWritten, err := io.Copy(archiveFile, src)
+	closeErr := archiveFile.Close()
+	if err != nil {
+		_ = os.Remove(archiveFile.Name())
+		return "", 0, err
+	}
+	if closeErr != nil {
+		_ = os.Remove(archiveFile.Name())
+		return "", 0, closeErr
+	}
+
+	return archiveFile.Name(), bytesWritten, nil
 }
 
 func main() {
@@ -149,43 +211,101 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// parse request
-	d := struct {
-		FunctionName     string                     `json:"name"`
-		FunctionEnv      string                     `json:"env"`
-		FunctionReplicas int                        `json:"replicas"`
-		FunctionZip      string                     `json:"zip"`
-		FunctionEnvs     []string                   `json:"envs"`
-		FunctionLabels   map[string]string          `json:"labels"`
-		Limits           *manager.FunctionResources `json:"limits"`
-	}{}
-
-	err := json.NewDecoder(r.Body).Decode(&d)
+	reader, err := r.MultipartReader()
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, "failed to decode upload request\n")
-		s.logger.Error("failed to decode upload request", zap.Error(err))
+		fmt.Fprintf(w, "failed to parse multipart upload request\n")
+		s.logger.Error("failed to parse multipart upload request", zap.Error(err))
 		return
 	}
 
-	s.logger.Info("receive upload request", zap.String("name", d.FunctionName), zap.String("env", d.FunctionEnv), zap.Int("replicas", d.FunctionReplicas), zap.Int("bytes", len(d.FunctionZip)), zap.Strings("envs", d.FunctionEnvs), zap.Any("labels", d.FunctionLabels), zap.Any("limits", d.Limits))
-	envs := make(map[string]string)
-	for _, e := range d.FunctionEnvs {
-		k, v, ok := strings.Cut(e, "=")
-
-		if !ok {
-			s.logger.Warn("invalid env", zap.String("env", e))
-			continue
+	var metadata *uploadMetadata
+	archivePath := ""
+	archiveBytes := int64(0)
+	defer func() {
+		if archivePath == "" {
+			return
 		}
 
-		envs[k] = v
+		if err := os.Remove(archivePath); err != nil && !os.IsNotExist(err) {
+			s.logger.Error("failed to remove uploaded archive", zap.String("path", archivePath), zap.Error(err))
+		}
+	}()
+
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, "failed to read upload request\n")
+			s.logger.Error("failed to read upload request", zap.Error(err))
+			return
+		}
+
+		switch part.FormName() {
+		case "metadata":
+			if metadata != nil {
+				part.Close()
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprintf(w, "duplicate upload metadata\n")
+				return
+			}
+
+			var decoded uploadMetadata
+			if err := json.NewDecoder(part).Decode(&decoded); err != nil {
+				part.Close()
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprintf(w, "failed to decode upload metadata\n")
+				s.logger.Error("failed to decode upload metadata", zap.Error(err))
+				return
+			}
+			metadata = &decoded
+		case "zip":
+			if archivePath != "" {
+				part.Close()
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprintf(w, "duplicate upload zip file\n")
+				return
+			}
+
+			archivePath, archiveBytes, err = s.writeUploadArchive(part)
+			if err != nil {
+				part.Close()
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprintf(w, "failed to persist upload archive\n")
+				s.logger.Error("failed to persist upload archive", zap.Error(err))
+				return
+			}
+		default:
+			s.logger.Debug("ignoring unexpected upload part", zap.String("part", part.FormName()))
+			_, _ = io.Copy(io.Discard, part)
+		}
+
+		part.Close()
 	}
 
-	if d.FunctionLabels == nil {
-		d.FunctionLabels = make(map[string]string)
+	if metadata == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "missing upload metadata\n")
+		return
 	}
 
-	err = s.ms.Upload(d.FunctionName, d.FunctionEnv, d.FunctionReplicas, d.FunctionZip, envs, d.FunctionLabels, manager.FunctionResourceRequest{Limits: d.Limits})
+	if archivePath == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "missing upload zip file\n")
+		return
+	}
+
+	s.logger.Info("receive upload request", zap.String("name", metadata.FunctionName), zap.String("env", metadata.FunctionEnv), zap.Int("replicas", metadata.FunctionReplicas), zap.Int64("bytes", archiveBytes), zap.Strings("envs", metadata.FunctionEnvs), zap.Any("labels", metadata.FunctionLabels), zap.Any("limits", metadata.Limits))
+	envs := parseFunctionEnvs(metadata.FunctionEnvs, s.logger)
+
+	if metadata.FunctionLabels == nil {
+		metadata.FunctionLabels = make(map[string]string)
+	}
+
+	err = s.ms.UploadArchive(metadata.FunctionName, metadata.FunctionEnv, metadata.FunctionReplicas, archivePath, envs, metadata.FunctionLabels, manager.FunctionResourceRequest{Limits: metadata.Limits})
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -196,7 +316,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	// return success
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "Function %s deployed\n", d.FunctionName)
+	fmt.Fprintf(w, "Function %s deployed\n", metadata.FunctionName)
 
 }
 
@@ -349,17 +469,7 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("receive url upload request", zap.String("name", d.FunctionName), zap.String("env", d.FunctionEnv), zap.Int("replicas", d.FunctionReplicas), zap.String("url", d.FunctionURL), zap.Strings("envs", d.FunctionEnvs), zap.String("subfolder", d.SubFolder), zap.Any("labels", d.FunctionLabels), zap.Any("limits", d.Limits))
 
-	envs := make(map[string]string)
-	for _, e := range d.FunctionEnvs {
-		k, v, ok := strings.Cut(e, "=")
-
-		if !ok {
-			s.logger.Warn("invalid env", zap.String("env", e))
-			continue
-		}
-
-		envs[k] = v
-	}
+	envs := parseFunctionEnvs(d.FunctionEnvs, s.logger)
 
 	if d.FunctionLabels == nil {
 		d.FunctionLabels = make(map[string]string)
