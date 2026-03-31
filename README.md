@@ -167,6 +167,8 @@ The multipart `metadata` JSON supports:
 | `TF_AUTOSCALER_ENABLED` | `true` | Enable autoscaler integration. |
 | `TF_CALLGRAPH_ENABLED` | `true` | Enable callgraph tracking. |
 | `TF_CALLGRAPH_METHOD` | `SMA` | Averaging method for callgraph stats: `SMA` or `EMA` (case-insensitive). |
+| `TF_CALLGRAPH_SMA_WINDOW_SIZE` | `10` | SMA window size used when method resolves to `SMA`; invalid values fall back to `10`. |
+| `TF_CALLGRAPH_EMA_ALPHA` | `0.3` | EMA alpha used when method resolves to `EMA`; invalid values fall back to `0.3`. |
 | `TF_DEFAULT_SCALE_TO_ZERO_IDLE_DURATION` | `5m` | Default scale-to-zero idle duration. |
 
 ## Debugging and Troubleshooting

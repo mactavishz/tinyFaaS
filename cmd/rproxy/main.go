@@ -73,7 +73,18 @@ func main() {
 		} else if callGraphConfig.Prewarm.Enabled && !autoscalerConfig.Enabled {
 			logger.Warn("prewarming configured but autoscaler is disabled - prewarming will not work")
 		}
-		logger.Info("callgraph method selected", zap.String("method", callGraphConfig.Method.String()))
+		switch callGraphConfig.Method {
+		case callgraph.ExponentialMovingAverage:
+			logger.Info("callgraph config",
+				zap.String("method", callGraphConfig.Method.String()),
+				zap.Float64("alpha", callGraphConfig.EMAConfig.Alpha),
+			)
+		default:
+			logger.Info("callgraph config",
+				zap.String("method", callGraphConfig.Method.String()),
+				zap.Int("window_size", callGraphConfig.SMAConfig.WindowSize),
+			)
+		}
 	} else {
 		logger.Info("callgraph tracking disabled")
 	}
