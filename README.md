@@ -166,6 +166,7 @@ The multipart `metadata` JSON supports:
 | `TF_BACKEND` | `docker` | Runtime backend. |
 | `TF_AUTOSCALER_ENABLED` | `true` | Enable autoscaler integration. |
 | `TF_CALLGRAPH_ENABLED` | `true` | Enable callgraph tracking. |
+| `TF_CALLGRAPH_METHOD` | `SMA` | Averaging method for callgraph stats: `SMA` or `EMA` (case-insensitive). |
 | `TF_DEFAULT_SCALE_TO_ZERO_IDLE_DURATION` | `5m` | Default scale-to-zero idle duration. |
 
 ## Debugging and Troubleshooting

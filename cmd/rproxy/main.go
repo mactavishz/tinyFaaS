@@ -73,6 +73,7 @@ func main() {
 		} else if callGraphConfig.Prewarm.Enabled && !autoscalerConfig.Enabled {
 			logger.Warn("prewarming configured but autoscaler is disabled - prewarming will not work")
 		}
+		logger.Info("callgraph method selected", zap.String("method", callGraphConfig.Method.String()))
 	} else {
 		logger.Info("callgraph tracking disabled")
 	}
