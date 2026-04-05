@@ -44,6 +44,7 @@ type Handler interface {
 	IPs() []string
 	Start() error
 	Stop() error
+	StopContainers()
 	Restart() error
 	Destroy() error
 	Logs() (io.Reader, error)
@@ -145,7 +146,9 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 	coldStartDuration := time.Since(coldStartTime)
 
 	if err != nil {
-		// container did not start properly...
+		// containers did not start properly...
+		ms.logger.Error("failed to start function containers", zap.String("function", name), zap.Error(err))
+		fh.StopContainers()
 		return err
 	}
 

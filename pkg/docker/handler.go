@@ -65,6 +65,7 @@ func (dh *dockerHandler) Start() error {
 	dh.opMux.Lock()
 	defer dh.opMux.Unlock()
 	ctx := context.Background()
+
 	if dh.isRunning {
 		dh.logger.Info("function is already started", zap.String("name", dh.name))
 		return nil
@@ -101,182 +102,91 @@ func (dh *dockerHandler) Start() error {
 		dh.containers = append(dh.containers, containerResp.ID)
 	}
 
-	// Track which containers have successfully started and their IPs
-	containerIPs := make(map[string]string)
-	var ipMux sync.Mutex
-
-	// Retry entire start process up to 10 times
-	err := retry.New(
-		retry.Attempts(10),
-		retry.Delay(50*time.Millisecond),
-		retry.DelayType(retry.FixedDelay),
-		retry.OnRetry(func(attempt uint, err error) {
-			dh.logger.Debug("start attempt failed", zap.Uint("attempt", attempt))
-		}),
-	).Do(func() error {
-		// Start only containers that haven't been successfully started yet
-		var startErrors []error
-		var startMux sync.Mutex
-		wg := sync.WaitGroup{}
-
-		for _, c := range dh.containers {
-			ipMux.Lock()
-			alreadyStarted := containerIPs[c] != ""
-			ipMux.Unlock()
-
-			if alreadyStarted {
-				continue // Skip containers that are already running with IP
-			}
-
-			wg.Add(1)
-			go func(cid string) {
-				defer wg.Done()
-
-				// Start container
-				dh.logger.Info("starting container", zap.String("ID", util.GetShortID(cid)))
-				_, err := dh.client.ContainerStart(
-					context.Background(),
-					cid,
-					client.ContainerStartOptions{},
-				)
-				if err != nil {
-					dh.logger.Error("error starting container", zap.Error(err))
-					startMux.Lock()
-					startErrors = append(startErrors, fmt.Errorf("failed to start container %s: %w", util.GetShortID(cid), err))
-					startMux.Unlock()
-					return
-				}
-
-				// Get container IP immediately after starting
-				inspectRes, err := dh.client.ContainerInspect(
-					context.Background(),
-					cid,
-					client.ContainerInspectOptions{},
-				)
-				if err != nil {
-					dh.logger.Error("failed to inspect container", zap.Error(err))
-					startMux.Lock()
-					startErrors = append(startErrors, fmt.Errorf("failed to inspect container %s: %w", util.GetShortID(cid), err))
-					startMux.Unlock()
-					return
-				}
-
-				ip := inspectRes.Container.NetworkSettings.Networks[dh.networkName].IPAddress
-				if !ip.IsValid() {
-					dh.logger.Error("container IP address not found", zap.String("network", dh.networkName))
-					startMux.Lock()
-					startErrors = append(startErrors, fmt.Errorf("container %s has no IP address", util.GetShortID(cid)))
-					startMux.Unlock()
-					return
-				}
-
-				dh.logger.Info("container IP", zap.String("ip", ip.String()))
-				ipMux.Lock()
-				containerIPs[cid] = ip.String()
-				ipMux.Unlock()
-			}(c)
-		}
-		wg.Wait()
-
-		// If any container failed to start or get IP, return error to trigger retry
-		if len(startErrors) > 0 {
-			return fmt.Errorf("failed to start %d containers: %v", len(startErrors), startErrors)
+	for _, cid := range dh.containers {
+		// Start container
+		dh.logger.Info("starting container", zap.String("ID", util.GetShortID(cid)))
+		_, err := dh.client.ContainerStart(
+			context.Background(),
+			cid,
+			client.ContainerStartOptions{},
+		)
+		if err != nil {
+			dh.logger.Error("error starting container", zap.Error(err))
+			return fmt.Errorf("failed to start container %s: %w", util.GetShortID(cid), err)
 		}
 
-		// Build ordered IP list matching container order
-		tempHandlerIPs := make([]string, 0, len(dh.containers))
-		for _, cid := range dh.containers {
-			ipMux.Lock()
-			ip := containerIPs[cid]
-			ipMux.Unlock()
-
-			if ip == "" {
-				return fmt.Errorf("missing IP in container %s", cid)
-			}
-			tempHandlerIPs = append(tempHandlerIPs, ip)
+		// Get container IP immediately after starting
+		inspectRes, err := dh.client.ContainerInspect(
+			context.Background(),
+			cid,
+			client.ContainerInspectOptions{},
+		)
+		if err != nil {
+			dh.logger.Error("failed to inspect container", zap.Error(err))
+			return fmt.Errorf("failed to inspect container %s: %w", util.GetShortID(cid), err)
 		}
 
-		// Store IPs for health checks
-		dh.handlerIPs = tempHandlerIPs
-
-		// Wait for all containers to be ready
-		var healthErrors []error
-		var healthMux sync.Mutex
-
-		for i, ip := range dh.handlerIPs {
-			wg.Add(1)
-			go func(index int, cip string) {
-				defer wg.Done()
-				dh.logger.Info("waiting for container to be ready", zap.String("ip", cip))
-
-				err := retry.New(
-					retry.Attempts(50),
-					retry.DelayType(retry.FixedDelay),
-					retry.Delay(50*time.Millisecond),
-					retry.OnRetry(func(retryAttempt uint, err error) {
-						dh.logger.Debug("ready check attempt failed", zap.Uint("attempt", retryAttempt), zap.String("ip", cip))
-					}),
-				).Do(func() error {
-					client := http.Client{
-						Timeout: 1 * time.Second,
-					}
-					resp, err := client.Get("http://" + cip + ":8000/health")
-					if err != nil {
-						return err
-					}
-					defer resp.Body.Close()
-					if resp.StatusCode == http.StatusOK {
-						dh.logger.Info("container is ready", zap.String("ip", cip))
-						return nil
-					}
-					return fmt.Errorf("container health probe failed with status: %s", resp.Status)
-				})
-
-				if err != nil {
-					containerID := dh.containers[index]
-					dh.logger.Error("container not ready after health check retries", zap.String("ip", cip), zap.Error(err))
-					healthMux.Lock()
-					healthErrors = append(healthErrors, fmt.Errorf("container %s, ip: %s not ready: %w", util.GetShortID(containerID), cip, err))
-					healthMux.Unlock()
-				}
-			}(i, ip)
+		ip := inspectRes.Container.NetworkSettings.Networks[dh.networkName].IPAddress
+		if !ip.IsValid() {
+			dh.logger.Error("container IP address not found", zap.String("network", dh.networkName))
+			return fmt.Errorf("container %s has no IP address", util.GetShortID(cid))
 		}
 
-		wg.Wait()
-
-		// If any health check failed, return error to trigger retry
-		if len(healthErrors) > 0 {
-			// Log container details for debugging
-			for i := range dh.handlerIPs {
-				containerID := dh.containers[i]
-				logs, logErr := dh.getContainerLogs(containerID)
-				if logErr != nil {
-					dh.logger.Error("error getting logs for container", zap.String("ID", util.GetShortID(containerID)), zap.Error(logErr))
-				} else {
-					dh.logger.Info("logs for container", zap.String("ID", util.GetShortID(containerID)), zap.String("logs", logs))
-				}
-			}
-			return fmt.Errorf("%d containers failed health checks: %v", len(healthErrors), healthErrors)
-		}
-
-		// All containers started and healthy - success!
-		return nil
-	})
-
-	if err != nil {
-		dh.logger.Error("failed to start all containers after max retries", zap.Error(err))
-		dh.logger.Info("cleaning up partially started containers")
-		dh.stopContainers()
-		return fmt.Errorf("start failed after max retries: %w", err)
+		dh.logger.Info("container IP", zap.String("ip", ip.String()))
+		dh.handlerIPs = append(dh.handlerIPs, ip.String())
 	}
 
+	// Wait for all containers to be ready
+	for i, ip := range dh.handlerIPs {
+		if ip == "" {
+			dh.logger.Error("container IP is empty", zap.Int("index", i))
+		}
+		dh.logger.Info("waiting for container to be ready", zap.String("ip", ip))
+
+		err := retry.New(
+			retry.Attempts(20),
+			retry.Delay(50*time.Millisecond),
+			retry.OnRetry(func(retryAttempt uint, err error) {
+				dh.logger.Debug("ready check attempt failed", zap.Uint("attempt", retryAttempt), zap.String("ip", ip))
+			}),
+		).Do(func() error {
+			client := http.Client{
+				Timeout: 1 * time.Second,
+			}
+			resp, err := client.Get("http://" + ip + ":8000/health")
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				dh.logger.Info("container is ready", zap.String("ip", ip))
+				return nil
+			}
+			return fmt.Errorf("container health probe failed with status: %s", resp.Status)
+		})
+
+		if err != nil {
+			containerID := dh.containers[i]
+			dh.logger.Error("container not ready after max health check retries", zap.String("ip", ip))
+			logs, logErr := dh.getContainerLogs(containerID)
+			if logErr != nil {
+				dh.logger.Error("error getting logs for container", zap.String("ID", util.GetShortID(containerID)), zap.Error(logErr))
+			} else {
+				dh.logger.Info("logs for container", zap.String("ID", util.GetShortID(containerID)), zap.String("logs", logs))
+			}
+			return err
+		}
+	}
+
+	dh.logger.Debug("health check completed", zap.Int("total", len(dh.handlerIPs)))
 	dh.isRunning = true
 	dh.logger.Info("all containers started", zap.Int("count", len(dh.containers)))
 	return nil
 }
 
-// stopContainers stops all function containers (used by cleanup during startup failures)
-func (dh *dockerHandler) stopContainers() {
+// StopContainers stops all function containers (used by cleanup during startup failures)
+func (dh *dockerHandler) StopContainers() {
+	dh.logger.Info("stopping all function containers", zap.String("name", dh.name))
 	wg := sync.WaitGroup{}
 	for _, c := range dh.containers {
 		wg.Add(1)
