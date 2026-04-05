@@ -56,11 +56,18 @@ func (r *Route) PickIP() (string, error) {
 	return r.ips[rand.Intn(len(r.ips))], nil
 }
 
-// DefaultHeartbeatInterval is the interval at which the heartbeat worker sends batch heartbeats.
+// defaultHeartbeatInterval is the interval at which the heartbeat worker sends batch heartbeats.
 // This should be significantly smaller than the autoscaler's check interval (default 10s)
 // to ensure at least 2-3 heartbeats are sent per check cycle under sustained load.
 // Using 2 seconds provides ~5 heartbeats per check cycle as a safety margin.
-const DefaultHeartbeatInterval = 2 * time.Second
+const (
+	defaultHeartbeatInterval = 2 * time.Second
+
+	// After manager accepts a scale-up request, rproxy may still need a brief window
+	// for route/IP state to be visible locally before invocation can proceed.
+	scaleUpRouteReadyTimeout  = 500 * time.Millisecond
+	scaleUpRouteReadyInterval = 25 * time.Millisecond
+)
 
 // newHTTPClient creates an HTTP client optimized for internal communication.
 // Uses connection pooling to reduce connection overhead for frequent requests.
@@ -89,7 +96,7 @@ func New(logger *zap.Logger, mode string) *RProxy {
 		mode:                mode,
 		logger:              logger,
 		httpClient:          newHTTPClient(),
-		heartbeatInterval:   DefaultHeartbeatInterval,
+		heartbeatInterval:   defaultHeartbeatInterval,
 		pendingHeartbeats:   make(map[string]struct{}),
 		heartbeatStopChan:   make(chan struct{}),
 		heartbeatDoneChan:   make(chan struct{}),
@@ -208,6 +215,53 @@ func (r *RProxy) Update(name string) error {
 	return nil
 }
 
+func copyRoute(route *Route) *Route {
+	if route == nil {
+		return nil
+	}
+
+	ips := make([]string, len(route.ips))
+	copy(ips, route.ips)
+
+	return &Route{
+		ips:              ips,
+		isActive:         route.isActive,
+		callgraphEnabled: route.callgraphEnabled,
+	}
+}
+
+func (r *RProxy) getRouteSnapshot(name string) (*Route, bool) {
+	r.routingTableMux.RLock()
+	defer r.routingTableMux.RUnlock()
+
+	route, ok := r.routingTable[name]
+	if !ok {
+		return nil, false
+	}
+
+	return copyRoute(route), true
+}
+
+func (r *RProxy) waitForRouteReady(name string, timeout time.Duration) (*Route, bool) {
+	deadline := time.Now().Add(timeout)
+	for {
+		route, exists := r.getRouteSnapshot(name)
+		if !exists {
+			return nil, false
+		}
+
+		if route.isActive && len(route.ips) > 0 {
+			return route, true
+		}
+
+		if time.Now().After(deadline) {
+			return route, true
+		}
+
+		time.Sleep(scaleUpRouteReadyInterval)
+	}
+}
+
 func (r *RProxy) Call(name string, payload []byte, async bool, header http.Header) (int, []byte) {
 	startTime := time.Now()
 
@@ -236,10 +290,8 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 		}
 	}
 
-	r.routingTableMux.RLock()
-	calleeRoute, ok := r.routingTable[name]
-	callerRoute, callerRouteOK := r.routingTable[caller]
-	r.routingTableMux.RUnlock()
+	calleeRoute, ok := r.getRouteSnapshot(name)
+	callerRoute, callerRouteOK := r.getRouteSnapshot(caller)
 
 	if !ok {
 		r.logger.Error("function not found", zap.String("name", name))
@@ -247,16 +299,6 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	}
 
 	r.logger.Debug("found function route", zap.Strings("ips", calleeRoute.ips), zap.Bool("active", calleeRoute.isActive))
-
-	// Record the edge (this will calculate edge time if caller exists and callgraph is enabled for both sides)
-	if calleeRoute.callgraphEnabled {
-		effectiveCaller := ""
-		// If caller's callgraph is disabled but callee is enabled, record as external (caller="")
-		if caller != "" && callerRouteOK && callerRoute.callgraphEnabled {
-			effectiveCaller = caller
-		}
-		r.tracker.RecordEdge(effectiveCaller, name, requestID, callerExecutionID, startTime)
-	}
 
 	// Check if function is scaled down and trigger cold start if needed
 	if r.autoscalerEnabled && !calleeRoute.isActive {
@@ -269,9 +311,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 			return http.StatusServiceUnavailable, nil
 		}
 
-		r.routingTableMux.RLock()
-		updatedRoute, exists := r.routingTable[name]
-		r.routingTableMux.RUnlock()
+		updatedRoute, exists := r.waitForRouteReady(name, scaleUpRouteReadyTimeout)
 		if !exists {
 			r.logger.Error("function route disappeared after scale-up", zap.String("name", name))
 			return http.StatusServiceUnavailable, nil
@@ -285,6 +325,17 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 			zap.Bool("active", calleeRoute.isActive),
 			zap.Int("ipCount", len(calleeRoute.ips)))
 		return http.StatusServiceUnavailable, nil
+	}
+
+	// Record the edge only after the route is confirmed ready for invocation.
+	// This avoids polluting callgraph edges with failed cold-start attempts.
+	if calleeRoute.callgraphEnabled && r.tracker != nil {
+		effectiveCaller := ""
+		// If caller's callgraph is disabled but callee is enabled, record as external (caller="")
+		if caller != "" && callerRouteOK && callerRoute.callgraphEnabled {
+			effectiveCaller = caller
+		}
+		r.tracker.RecordEdge(effectiveCaller, name, requestID, callerExecutionID, startTime)
 	}
 
 	r.queueHeartbeat(name)
@@ -301,14 +352,14 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 
 	// Trigger prewarming for downstream functions (fire-and-forget, non-blocking)
 	// Prewarming requires both callgraph and autoscaler to be enabled
-	if calleeRoute.callgraphEnabled && r.autoscalerEnabled {
+	if calleeRoute.callgraphEnabled && r.autoscalerEnabled && r.tracker != nil {
 		go r.prewarmDownstream(name)
 	}
 
 	// Mark that this function is starting execution
 	startedExecution := false
 	functionStartTime := time.Now()
-	if calleeRoute.callgraphEnabled {
+	if calleeRoute.callgraphEnabled && r.tracker != nil {
 		r.tracker.StartExecution(name, requestID, calleeExecutionID, functionStartTime)
 		startedExecution = true
 	}
