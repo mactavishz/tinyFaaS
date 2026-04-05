@@ -1,7 +1,8 @@
-#!/usr/bin/env python3
+from fastapi import Request
+from fastapi.responses import Response
 
-import typing
 
-def handle(input: typing.Optional[str], headers: typing.Optional[typing.Dict[str, str]]) -> typing.Optional[str]:
-    """echo the input"""
-    return input
+async def handle(request: Request) -> Response:
+    print("Received request with headers:", request.headers)
+    body = await request.body()
+    return Response(content=body, media_type="text/plain")
