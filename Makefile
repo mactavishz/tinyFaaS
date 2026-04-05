@@ -51,7 +51,7 @@ build-gateway: tf-gateway-${OS}-${ARCH}
 .PHONY: unit-test
 unit-test:
 	@echo "Running unit tests..."
-	go test -count=1 -v ./pkg/... --cover
+	go test -v ./pkg/... --cover
 
 .PHONY: integration-test
 integration-test:
