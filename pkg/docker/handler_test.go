@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/containerd/errdefs"
 	"github.com/stretchr/testify/assert"
@@ -94,4 +95,67 @@ func TestLogsReturnsEmptyReaderWhenNoContainers(t *testing.T) {
 	b, err := io.ReadAll(r)
 	require.NoError(t, err)
 	assert.Equal(t, "", string(b))
+}
+
+func TestWaitForContainerIPRetriesUntilAvailable(t *testing.T) {
+	attempts := 0
+	dh := &dockerHandler{
+		logger: zap.NewNop(),
+		ipInspector: func(string) (string, error) {
+			attempts++
+			if attempts < 3 {
+				return "", errors.New("network not ready")
+			}
+			return "10.0.0.2", nil
+		},
+	}
+
+	ip, err := dh.waitForContainerIP("cid-test", 250*time.Millisecond)
+	require.NoError(t, err)
+	assert.Equal(t, "10.0.0.2", ip)
+	assert.GreaterOrEqual(t, attempts, 3)
+}
+
+func TestWaitForContainerIPTimesOut(t *testing.T) {
+	dh := &dockerHandler{
+		logger: zap.NewNop(),
+		ipInspector: func(string) (string, error) {
+			return "", errors.New("network not ready")
+		},
+	}
+
+	_, err := dh.waitForContainerIP("cid-timeout", 80*time.Millisecond)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timed out waiting for container")
+}
+
+func TestWaitForContainerReadyRetriesUntilHealthy(t *testing.T) {
+	attempts := 0
+	dh := &dockerHandler{
+		logger: zap.NewNop(),
+		healthChecker: func(string) error {
+			attempts++
+			if attempts < 3 {
+				return errors.New("connection refused")
+			}
+			return nil
+		},
+	}
+
+	err := dh.waitForContainerReady("10.0.0.2", "cid-ready", 300*time.Millisecond)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, attempts, 3)
+}
+
+func TestWaitForContainerReadyTimesOut(t *testing.T) {
+	dh := &dockerHandler{
+		logger: zap.NewNop(),
+		healthChecker: func(string) error {
+			return errors.New("still starting")
+		},
+	}
+
+	err := dh.waitForContainerReady("10.0.0.2", "cid-fail", 90*time.Millisecond)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed readiness checks")
 }

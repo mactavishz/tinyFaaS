@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"sync"
 	"time"
@@ -18,13 +19,18 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
-
-	retry "github.com/avast/retry-go/v5"
 )
 
 const (
 	TmpDir                = "./tmp"
 	DEFAULT_PUBLIC_DOMAIN = "tinyfaas.com"
+	containerIPTimeout    = 10 * time.Second
+	containerIPInterval   = 25 * time.Millisecond
+
+	containerReadyTimeout         = 10 * time.Second
+	containerHealthRequestTimeout = 100 * time.Millisecond
+	containerHealthInitialDelay   = 50 * time.Millisecond
+	containerHealthMaxDelay       = 250 * time.Millisecond
 )
 
 // List of supported runtimes (must match directories in pkg/docker/runtimes)
@@ -50,9 +56,17 @@ type dockerHandler struct {
 	envVars          []string           // store environment variables for container recreation
 	extraHosts       []string           // store extra hosts for container recreation
 	containerRemover func(string) error // optional override for tests
-	networkRemover   func() error       // optional override for tests
-	imageRemover     func() error       // optional override for tests
+	ipInspector      func(string) (string, error)
+	healthChecker    func(string) error
+	networkRemover   func() error // optional override for tests
+	imageRemover     func() error // optional override for tests
 	logger           *zap.Logger
+}
+
+type readinessResult struct {
+	index int
+	ip    string
+	err   error
 }
 
 func (dh *dockerHandler) IPs() []string {
@@ -73,6 +87,7 @@ func (dh *dockerHandler) Start() error {
 
 	// Clear any old container IDs
 	dh.containers = make([]string, 0, dh.replicas)
+	dh.handlerIPs = make([]string, 0, dh.replicas)
 
 	// Create containers from image
 	for i := 0; i < dh.replicas; i++ {
@@ -114,74 +129,199 @@ func (dh *dockerHandler) Start() error {
 			dh.logger.Error("error starting container", zap.Error(err))
 			return fmt.Errorf("failed to start container %s: %w", util.GetShortID(cid), err)
 		}
-
-		// Get container IP immediately after starting
-		inspectRes, err := dh.client.ContainerInspect(
-			context.Background(),
-			cid,
-			client.ContainerInspectOptions{},
-		)
-		if err != nil {
-			dh.logger.Error("failed to inspect container", zap.Error(err))
-			return fmt.Errorf("failed to inspect container %s: %w", util.GetShortID(cid), err)
-		}
-
-		ip := inspectRes.Container.NetworkSettings.Networks[dh.networkName].IPAddress
-		if !ip.IsValid() {
-			dh.logger.Error("container IP address not found", zap.String("network", dh.networkName))
-			return fmt.Errorf("container %s has no IP address", util.GetShortID(cid))
-		}
-
-		dh.logger.Info("container IP", zap.String("ip", ip.String()))
-		dh.handlerIPs = append(dh.handlerIPs, ip.String())
 	}
 
-	// Wait for all containers to be ready
-	for i, ip := range dh.handlerIPs {
-		if ip == "" {
-			dh.logger.Error("container IP is empty", zap.Int("index", i))
-		}
-		dh.logger.Info("waiting for container to be ready", zap.String("ip", ip))
+	results := make(chan readinessResult, len(dh.containers))
 
-		err := retry.New(
-			retry.Attempts(20),
-			retry.Delay(50*time.Millisecond),
-			retry.OnRetry(func(retryAttempt uint, err error) {
-				dh.logger.Debug("ready check attempt failed", zap.Uint("attempt", retryAttempt), zap.String("ip", ip))
-			}),
-		).Do(func() error {
-			client := http.Client{
-				Timeout: 1 * time.Second,
-			}
-			resp, err := client.Get("http://" + ip + ":8000/health")
+	for i, cid := range dh.containers {
+		go func(index int, containerID string) {
+			ip, err := dh.waitForContainerIP(containerID, containerIPTimeout)
 			if err != nil {
-				return err
+				results <- readinessResult{index: index, err: err}
+				return
 			}
-			defer resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				dh.logger.Info("container is ready", zap.String("ip", ip))
-				return nil
-			}
-			return fmt.Errorf("container health probe failed with status: %s", resp.Status)
-		})
 
-		if err != nil {
-			containerID := dh.containers[i]
-			dh.logger.Error("container not ready after max health check retries", zap.String("ip", ip))
+			dh.logger.Info("container IP", zap.String("ip", ip))
+			dh.logger.Info("waiting for container to be ready", zap.String("ip", ip))
+
+			err = dh.waitForContainerReady(ip, containerID, containerReadyTimeout)
+			if err != nil {
+				results <- readinessResult{index: index, ip: ip, err: err}
+				return
+			}
+
+			results <- readinessResult{index: index, ip: ip}
+		}(i, cid)
+	}
+
+	handlerIPs := make([]string, len(dh.containers))
+	readinessErrors := make([]error, 0)
+
+	for range dh.containers {
+		res := <-results
+		if res.err != nil {
+			containerID := dh.containers[res.index]
+			dh.logger.Error(
+				"container failed readiness checks",
+				zap.String("ID", util.GetShortID(containerID)),
+				zap.String("ip", res.ip),
+				zap.Error(res.err),
+			)
+
 			logs, logErr := dh.getContainerLogs(containerID)
 			if logErr != nil {
 				dh.logger.Error("error getting logs for container", zap.String("ID", util.GetShortID(containerID)), zap.Error(logErr))
 			} else {
 				dh.logger.Info("logs for container", zap.String("ID", util.GetShortID(containerID)), zap.String("logs", logs))
 			}
-			return err
+
+			readinessErrors = append(readinessErrors, fmt.Errorf("container %s: %w", util.GetShortID(containerID), res.err))
+			continue
 		}
+
+		handlerIPs[res.index] = res.ip
 	}
+
+	if len(readinessErrors) > 0 {
+		dh.handlerIPs = nil
+		return fmt.Errorf("container readiness failed: %w", errors.Join(readinessErrors...))
+	}
+
+	dh.handlerIPs = handlerIPs
 
 	dh.logger.Debug("health check completed", zap.Int("total", len(dh.handlerIPs)))
 	dh.isRunning = true
 	dh.logger.Info("all containers started", zap.Int("count", len(dh.containers)))
 	return nil
+}
+
+func (dh *dockerHandler) waitForContainerIP(containerID string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+
+	for {
+		ip, err := dh.inspectContainerIP(containerID)
+		if err == nil {
+			return ip, nil
+		}
+
+		lastErr = err
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("timed out waiting for container %s IP after %s: %w", util.GetShortID(containerID), timeout, lastErr)
+		}
+
+		time.Sleep(containerIPInterval)
+	}
+}
+
+func (dh *dockerHandler) inspectContainerIP(containerID string) (string, error) {
+	if dh.ipInspector != nil {
+		return dh.ipInspector(containerID)
+	}
+
+	inspectRes, err := dh.client.ContainerInspect(
+		context.Background(),
+		containerID,
+		client.ContainerInspectOptions{},
+	)
+	if err != nil {
+		return "", err
+	}
+
+	networks := inspectRes.Container.NetworkSettings.Networks
+	if len(networks) == 0 {
+		return "", errors.New("container network settings not ready")
+	}
+
+	networkSettings, ok := networks[dh.networkName]
+	if !ok {
+		return "", fmt.Errorf("container network %s not attached yet", dh.networkName)
+	}
+
+	ip := networkSettings.IPAddress
+	if !ip.IsValid() {
+		return "", errors.New("container IP address not assigned yet")
+	}
+
+	return ip.String(), nil
+}
+
+func (dh *dockerHandler) waitForContainerReady(ip string, containerID string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	attempt := 0
+	var lastErr error
+
+	for {
+		err := dh.probeContainerHealth(ip)
+		if err == nil {
+			dh.logger.Info("container is ready", zap.String("ip", ip))
+			return nil
+		}
+
+		lastErr = err
+		dh.logger.Debug(
+			"ready check attempt failed",
+			zap.Int("attempt", attempt+1),
+			zap.String("ip", ip),
+			zap.Error(err),
+		)
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("container %s failed readiness checks after %s: %w", util.GetShortID(containerID), timeout, lastErr)
+		}
+
+		delay := readinessBackoffDelay(attempt)
+		attempt++
+		remaining := time.Until(deadline)
+		if delay > remaining {
+			delay = remaining
+		}
+
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+	}
+}
+
+func (dh *dockerHandler) probeContainerHealth(ip string) error {
+	if dh.healthChecker != nil {
+		return dh.healthChecker(ip)
+	}
+
+	httpClient := http.Client{Timeout: containerHealthRequestTimeout}
+	resp, err := httpClient.Get("http://" + ip + ":8000/health")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("container health probe failed with status: %s", resp.Status)
+	}
+
+	return nil
+}
+
+// Calculate exponential backoff with full jitter for readiness checks
+func readinessBackoffDelay(attempt int) time.Duration {
+	delay := containerHealthInitialDelay
+
+	// Calculate exponential backoff
+	// Ensure we don't overflow before capping at MaxDelay
+	for i := 0; i < attempt && delay < containerHealthMaxDelay; i++ {
+		delay *= 2
+	}
+
+	if delay > containerHealthMaxDelay {
+		delay = containerHealthMaxDelay
+	}
+
+	// Apply Full Jitter
+	// rand.Int64n returns a value in [0, delay)
+	if delay <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(delay)))
 }
 
 // StopContainers stops all function containers (used by cleanup during startup failures)
