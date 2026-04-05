@@ -134,6 +134,15 @@ All endpoints below are exposed through gateway path prefix `/system`.
 | `/system/callgraph/function/{name}` | `GET` | None | Development mode only. |
 | `/system/callgraph/edge?callee=<fn>&caller=<fn>` | `GET` | None | Development mode only (`caller` is optional). |
 
+## Cold Start Readiness Semantics
+
+- During scale-up, manager startup waits for container readiness checks to complete before the function is considered running.
+- Readiness checks require each replica to have:
+  - a valid container IP on the function network
+  - `GET /health` returning `200 OK` on port `8000`
+- Replica readiness checks run concurrently, but route activation still requires **all configured replicas** to become ready.
+- RProxy records callgraph edges only after a function route is confirmed ready for invocation. Failed cold-start attempts that cannot route traffic do not create edge records.
+
 ### `/system/upload` Metadata Schema
 
 The multipart `metadata` JSON supports:
