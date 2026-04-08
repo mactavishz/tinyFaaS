@@ -1,7 +1,12 @@
-from fastapi import Request
-from fastapi.responses import JSONResponse
+import json
 
 
-async def handle(request: Request) -> JSONResponse:
+def handle(request):
     print("Received request with headers:", request.headers)
-    return JSONResponse(content=dict(request.headers))
+    headers = {key.lower(): value for key, value in request.headers.items()}
+    return {
+        "body": json.dumps(headers),
+        "headers": {
+            "Content-Type": "application/json"
+        }
+    }

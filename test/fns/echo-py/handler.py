@@ -1,8 +1,8 @@
-from fastapi import Request
-from fastapi.responses import Response
-
-
-async def handle(request: Request) -> Response:
+def handle(request):
     print("Received request with headers:", request.headers)
-    body = await request.body()
-    return Response(content=body, media_type="text/plain")
+    return {
+        "body": request.get_data(as_text=True),
+        "headers": {
+            "Content-Type": "text/plain"
+        }
+    }
