@@ -49,9 +49,7 @@ def format_response(res):
             statusCode = res['statusCode']
         body = format_body(res, content_type)
         headers = format_headers(res)
-
-        return Response(body, status=statusCode, headers=headers)
-
+        return body, statusCode, headers
     return res
 
 
