@@ -99,7 +99,6 @@ func TestExampleFunctions(t *testing.T) {
 
 		var got map[string]string
 		require.NoError(t, json.Unmarshal(body, &got))
-		t.Logf("Received headers in response: %v", got)
 		assert.Equal(t, "scalable_software_systems_group", got["lab"])
 		assert.Contains(t, got["user-agent"], "Go-http-client")
 	})
@@ -109,13 +108,12 @@ func TestExampleFunctions(t *testing.T) {
 		testutil.CleanupDeleteFunction(t, baseURL, fnName)
 		testutil.UploadFixtureFunction(t, baseURL, filepath.Join(fixturesDir, "show-headers-py"), fnName, "python3", 1, resourceLimits)
 
-		headers := map[string]string{"lab": "scalable_software_systems_group"}
+		headers := map[string]string{"Lab": "scalable_software_systems_group"}
 		status, body := testutil.Invoke(t, baseURL, fnName, http.MethodGet, nil, headers)
 		require.Equal(t, http.StatusOK, status)
 
 		var got map[string]string
 		require.NoError(t, json.Unmarshal(body, &got))
-		t.Logf("Received headers in response: %v", got)
 		assert.Equal(t, "scalable_software_systems_group", got["lab"])
 		assert.Contains(t, got["user-agent"], "Go-http-client")
 	})
