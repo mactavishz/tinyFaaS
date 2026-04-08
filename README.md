@@ -75,12 +75,31 @@ Reference examples are in [`./test/fns`](./test/fns).
 ### Python 3
 
 - Provide `handler.py`.
-- Implement:
+- Implement `handle(request)` and return a dict with keys `body`, `headers` and `statusCode`. You can also return a flask-compatible response type such as a tuple `(body, statusCode, headers)` or a `Response` object. The runtime normalizes these into the standard dict format. For example:
 
 ```python
-from typing import Dict, Optional, Union
+def handle(request):
+    return {
+        "body": "Hello World!",
+        "headers": {
+            "Content-Type": "text/plain"
+        },
+        "statusCode": 200
+    }
+    # or simply return the body with default headers and status code:
+    # return "Hello World!"
+    # or return a tuple with body and status code:
+    # return "Hello World!", 200
+    # or return a tuple with body, status code, and headers:
+    # return "Hello World!", 200, {"Content-Type": "text/plain"}
+```
 
-def handle(input: Optional[str], headers: Optional[Dict[str, str]]) -> Optional[Union[str, dict]]:
+- The `request` argument is the Flask request object exposed by the runtime.
+- The runtime serializes the returned dictionary as JSON.
+- Both synchronous and asynchronous handlers are supported. For example:
+
+```python
+def handle(request) -> dict:
     ...
 ```
 
