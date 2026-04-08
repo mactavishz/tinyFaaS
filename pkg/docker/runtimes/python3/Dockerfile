@@ -9,4 +9,4 @@ RUN touch requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 ENV PYTHONUNBUFFERED=1
-CMD ["fastapi", "run", "main.py", "--port", "8000"]
+CMD ["python", "main.py"]
