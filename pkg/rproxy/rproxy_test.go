@@ -89,7 +89,7 @@ func TestCallReturns503WhenColdStartTriggerFails(t *testing.T) {
 	}
 	r.routingTableMux.Unlock()
 
-	status, body := r.Call("test-func", []byte("{}"), false, http.Header{"X-Faas-Request-Id": []string{"req-coldstart-fail"}})
+	status, body := r.Call("test-func", []byte("{}"), false, http.Header{"X-Call-Id": []string{"req-coldstart-fail"}})
 	assert.Equal(t, http.StatusServiceUnavailable, status)
 	assert.Nil(t, body)
 	assert.Equal(t, 0, tracker.EdgeCount())
@@ -127,7 +127,7 @@ func TestCallWaitsForRouteReadyAfterScaleUp(t *testing.T) {
 
 	r.SetGatewayAddr(strings.TrimPrefix(scaleUpServer.URL, "http://"))
 
-	status, body := r.Call("test-func", []byte("{}"), false, http.Header{"X-Faas-Request-Id": []string{"req-route-sync"}})
+	status, body := r.Call("test-func", []byte("{}"), false, http.Header{"X-Call-Id": []string{"req-route-sync"}})
 	assert.Equal(t, http.StatusOK, status)
 	assert.Equal(t, []byte("ok"), body)
 }
@@ -151,7 +151,7 @@ func TestCallRecordsEdgeWhenRouteReady(t *testing.T) {
 	}
 	r.routingTableMux.Unlock()
 
-	status, body := r.Call("test-func", []byte("{}"), false, http.Header{"X-Faas-Request-Id": []string{"req-edge-record"}})
+	status, body := r.Call("test-func", []byte("{}"), false, http.Header{"X-Call-Id": []string{"req-edge-record"}})
 	assert.Equal(t, http.StatusOK, status)
 	assert.Equal(t, []byte("ok"), body)
 

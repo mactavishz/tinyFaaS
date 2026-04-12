@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -155,21 +156,25 @@ func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, targetAdd
 // InvokeMiddleware returns a middleware that handles gateway-specific headers
 func (g *Gateway) InvokeMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Extract source IP and set X-Faas-Source-Ip header
+		start := time.Now()
+		// Extract source IP and set X-Source-Ip header
 		sourceIP := g.extractSourceIP(r)
-		r.Header.Set("X-Faas-Source-Ip", sourceIP)
+		r.Header.Set("X-Source-Ip", sourceIP)
 
-		// Generate X-Faas-Request-Id if not present
-		requestID := r.Header.Get("X-Faas-Request-Id")
-		if strings.TrimSpace(requestID) == "" {
-			requestID = uuid.New().String()
-			r.Header.Set("X-Faas-Request-Id", requestID)
+		// Generate X-Call-Id if not present
+		callID := r.Header.Get("X-Call-Id")
+		if strings.TrimSpace(callID) == "" {
+			callID = uuid.New().String()
+			r.Header.Set("X-Call-Id", callID)
 		}
+
+		r.Header.Add("X-Start-Time", fmt.Sprintf("%d", start.UTC().UnixNano()))
+		w.Header().Add("X-Start-Time", fmt.Sprintf("%d", start.UTC().UnixNano()))
 
 		g.logger.Debug("Invoke middleware",
 			zap.String("path", r.URL.Path),
-			zap.String("X-Faas-Source-Ip", r.Header.Get("X-Faas-Source-Ip")),
-			zap.String("X-Faas-Request-Id", r.Header.Get("X-Faas-Request-Id")))
+			zap.String("X-Source-Ip", r.Header.Get("X-Source-Ip")),
+			zap.String("X-Call-Id", r.Header.Get("X-Call-Id")))
 
 		next(w, r)
 	}

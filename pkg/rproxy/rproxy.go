@@ -265,19 +265,19 @@ func (r *RProxy) waitForRouteReady(name string, timeout time.Duration) (*Route, 
 func (r *RProxy) Call(name string, payload []byte, async bool, header http.Header) (int, []byte) {
 	startTime := time.Now()
 
-	requestID := header.Get("X-Faas-Request-Id")
-	if requestID == "" {
-		r.logger.Warn("missing X-Faas-Request-Id header", zap.String("function", name))
-		// Generate fallback requestID
-		requestID = fmt.Sprintf("unknown-%s", uuid.New().String())
+	callID := header.Get("X-Call-Id")
+	if callID == "" {
+		r.logger.Warn("missing X-Call-Id header", zap.String("function", name))
+		// Generate fallback callID
+		callID = fmt.Sprintf("unknown-%s", uuid.New().String())
 	}
 
-	callerExecutionID := header.Get("X-Tinyfaas-Execution-Id")
-	calleeExecutionID := uuid.New().String()
-	header.Set("X-Tinyfaas-Execution-Id", calleeExecutionID)
+	callerExecID := header.Get("X-Exec-Id")
+	calleeExecID := uuid.New().String()
+	header.Set("X-Exec-Id", calleeExecID)
 
 	// Extract source IP to detect if this is an internal call
-	sourceIP := header.Get("X-Faas-Source-Ip")
+	sourceIP := header.Get("X-Source-Ip")
 	caller := ""
 	if sourceIP != "" {
 		// Check if this is an internal call (from another function)
@@ -286,7 +286,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 			r.logger.Debug("detected internal call",
 				zap.String("caller", caller),
 				zap.String("callee", name),
-				zap.String("requestID", requestID))
+				zap.String("callID", callID))
 		}
 	}
 
@@ -335,7 +335,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 		if caller != "" && callerRouteOK && callerRoute.callgraphEnabled {
 			effectiveCaller = caller
 		}
-		r.tracker.RecordEdge(effectiveCaller, name, requestID, callerExecutionID, startTime)
+		r.tracker.RecordEdge(effectiveCaller, name, callID, callerExecID, startTime)
 	}
 
 	r.queueHeartbeat(name)
@@ -360,7 +360,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	startedExecution := false
 	functionStartTime := time.Now()
 	if calleeRoute.callgraphEnabled && r.tracker != nil {
-		r.tracker.StartExecution(name, requestID, calleeExecutionID, functionStartTime)
+		r.tracker.StartExecution(name, callID, calleeExecID, functionStartTime)
 		startedExecution = true
 	}
 
@@ -382,7 +382,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 			resp.Body.Close()
 			// Clean up execution context after async call completes
 			if startedExecution {
-				r.tracker.EndExecution(name, requestID, calleeExecutionID, time.Now())
+				r.tracker.EndExecution(name, callID, calleeExecID, time.Now())
 			}
 		}()
 		return http.StatusAccepted, nil
@@ -405,7 +405,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 
 	// End execution - records function stats and cleans up context
 	if startedExecution {
-		r.tracker.EndExecution(name, requestID, calleeExecutionID, time.Now())
+		r.tracker.EndExecution(name, callID, calleeExecID, time.Now())
 	}
 
 	return resp.StatusCode, res_body
