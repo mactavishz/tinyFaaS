@@ -24,7 +24,6 @@ help:
 	@echo "Main targets:"
 	@echo "  make build                  - Build tf-manager and tf-rproxy binaries"
 	@echo "  make install                - Build binaries and install systemd services"
-	@echo "  make up                     - (Re)Start tinyFaaS services using systemd (after install)"
 	@echo "  make down                   - Stop tinyFaaS services using systemd"
 	@echo "  make unit-test              - Run unit tests"
 	@echo "  make integration-test       - Run integration tests"

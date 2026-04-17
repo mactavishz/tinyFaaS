@@ -16,18 +16,26 @@ This software is research-grade and not production-ready.
 - Docker 24+
 - Make
 - `zip`, `curl`, `uuidgen` (required by helper scripts)
-- `systemd` and `sudo` access (required by `make up` / `make down`)
+- `systemd` and `sudo` access (`make down`)
 - [Vagrant](https://developer.hashicorp.com/vagrant) for testing
 
 ## Quick Start
 
-Assuming you have a Linux environment with the prerequisites, you can start tinyFaaS services with:
+Assuming you have a Linux environment with the prerequisites, you can start tinyFaaS services after installing with:
 
 ```sh
-make up
+make install
 ```
 
-This command rebuilds, installs, writes `/etc/default/tinyfaas`, and starts `tf-gateway`, `tf-rproxy`, and `tf-manager` via `systemd`.
+This command builds the binary artifacts, container runtimes, and creates `systemd` service units. If you want to customize configuration, create a file at `/etc/default/tinyfaas` with environment variable overrides (see Configuration section below).
+
+After installation, start the services with:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable tf-gateway tf-rproxy tf-manager
+sudo systemctl start tf-gateway tf-rproxy tf-manager
+```
 
 Stop and uninstall services:
 
@@ -182,7 +190,7 @@ The multipart `metadata` JSON supports:
 
 ## Configuration
 
-`make up` reads optional local overrides from `.env` and writes runtime config to `/etc/default/tinyfaas`.
+You can create a file at `/etc/default/tinyfaas` with environment variable overrides to customize configuration. Available environment variables and defaults are listed below. If the file is not present, defaults and any environment variables set in the shell will be used.
 
 | Environment Variable | Default | Description |
 | --- | --- | --- |
@@ -238,7 +246,6 @@ You can override gateway URL for integration tests with `TINYFAAS_TEST_GATEWAY_U
 | `make build` | Build `tf-manager`, `tf-rproxy`, `tf-gateway`. |
 | `make build-runtime-images` | Pre-build runtime base images. |
 | `make install` | Install binaries and `systemd` units. |
-| `make up` | Rebuild, reinstall, configure env, and start services. |
 | `make down` | Stop services, uninstall binaries/units, and clean artifacts. |
 | `make clean` | Remove build artifacts and tinyFaaS Docker assets. |
 | `make clean-all` | `make clean` plus embedded runtime artifacts and base images. |
