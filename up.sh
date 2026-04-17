@@ -24,9 +24,9 @@ MANAGER_PORT=${MANAGER_PORT:-8080}
 ENV=${ENV:-development}
 
 # Load local config if exists (git-ignored)
-if [ -f ".tinyfaas.env" ]; then
-    echo "==> Loading local configuration from .tinyfaas.env"
-    source ".tinyfaas.env"
+if [ -f ".env" ]; then
+    echo "==> Loading local configuration from .env"
+    source ".env"
 fi
 
 echo "==> Autoscaler settings: ENABLED=$AUTOSCALER_ENABLED, IDLE_DURATION=$DEFAULT_SCALE_TO_ZERO_IDLE_DURATION"

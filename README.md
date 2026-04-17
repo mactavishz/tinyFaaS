@@ -182,7 +182,7 @@ The multipart `metadata` JSON supports:
 
 ## Configuration
 
-`make up` reads optional local overrides from `.tinyfaas.env` and writes runtime config to `/etc/default/tinyfaas`.
+`make up` reads optional local overrides from `.env` and writes runtime config to `/etc/default/tinyfaas`.
 
 | Environment Variable | Default | Description |
 | --- | --- | --- |
