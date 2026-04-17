@@ -186,18 +186,18 @@ The multipart `metadata` JSON supports:
 
 | Environment Variable | Default | Description |
 | --- | --- | --- |
-| `TF_GATEWAY_IP` | `0.0.0.0` | Gateway bind address. |
-| `TF_GATEWAY_PORT` | `80` | Gateway port. |
-| `TF_MANAGER_PORT` | `8080` | Manager port (loopback). |
-| `TF_RPROXY_PORT` | `8000` | RProxy port (loopback). |
-| `TF_ENV` | `development` | `development` enables callgraph debug endpoints. |
-| `TF_BACKEND` | `docker` | Runtime backend. |
-| `TF_AUTOSCALER_ENABLED` | `true` | Enable autoscaler integration. |
-| `TF_CALLGRAPH_ENABLED` | `true` | Enable callgraph tracking. |
-| `TF_CALLGRAPH_METHOD` | `SMA` | Averaging method for callgraph stats: `SMA` or `EMA` (case-insensitive). |
-| `TF_CALLGRAPH_SMA_WINDOW_SIZE` | `10` | SMA window size used when method resolves to `SMA`; invalid values fall back to `10`. |
-| `TF_CALLGRAPH_EMA_ALPHA` | `0.3` | EMA alpha used when method resolves to `EMA`; invalid values fall back to `0.3`. |
-| `TF_DEFAULT_SCALE_TO_ZERO_IDLE_DURATION` | `5m` | Default scale-to-zero idle duration. |
+| `GATEWAY_IP` | `0.0.0.0` | Gateway bind address. |
+| `GATEWAY_PORT` | `80` | Gateway port. |
+| `MANAGER_PORT` | `8080` | Manager port (loopback). |
+| `RPROXY_PORT` | `8000` | RProxy port (loopback). |
+| `ENV` | `development` | `development` enables callgraph debug endpoints. |
+| `BACKEND` | `docker` | Runtime backend. |
+| `AUTOSCALER_ENABLED` | `true` | Enable autoscaler integration. |
+| `CALLGRAPH_ENABLED` | `true` | Enable callgraph tracking. |
+| `CALLGRAPH_METHOD` | `SMA` | Averaging method for callgraph stats: `SMA` or `EMA` (case-insensitive). |
+| `CALLGRAPH_SMA_WINDOW_SIZE` | `10` | SMA window size used when method resolves to `SMA`; invalid values fall back to `10`. |
+| `CALLGRAPH_EMA_ALPHA` | `0.3` | EMA alpha used when method resolves to `EMA`; invalid values fall back to `0.3`. |
+| `DEFAULT_SCALE_TO_ZERO_IDLE_DURATION` | `5m` | Default scale-to-zero idle duration. |
 
 ## Debugging and Troubleshooting
 

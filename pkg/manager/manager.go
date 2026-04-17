@@ -20,8 +20,8 @@ import (
 )
 
 var (
-	// TmpDir can be overridden via TF_TMP_DIR environment variable
-	TmpDir = util.GetEnvOrDefault("TF_TMP_DIR", "/var/lib/tinyfaas/tmp")
+	// TmpDir can be overridden via TMP_DIR environment variable
+	TmpDir = util.GetEnvOrDefault("TMP_DIR", "/var/lib/tinyfaas/tmp")
 )
 
 type ManagementService struct {

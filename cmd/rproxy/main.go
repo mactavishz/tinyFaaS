@@ -29,16 +29,16 @@ func main() {
 	logger := util.CreateLogger()
 	defer logger.Sync() // flushes buffer, if any
 
-	listenAddr := fmt.Sprintf("%s:%s", "127.0.0.1", util.GetEnvOrDefault("TF_RPROXY_PORT", DEFAULT_PORT))
+	listenAddr := fmt.Sprintf("%s:%s", "127.0.0.1", util.GetEnvOrDefault("RPROXY_PORT", DEFAULT_PORT))
 
 	// Get mode from environment variable
-	mode := util.GetEnvOrDefault("TF_ENV", DEFAULT_MODE)
+	mode := util.GetEnvOrDefault("ENV", DEFAULT_MODE)
 	logger.Info("RProxy ENV", zap.String("env", mode))
 	r := rproxy.New(logger, mode)
 
 	// Configure gateway address for heartbeat and scale-up requests
-	gatewayIP := util.GetEnvOrDefault("TF_GATEWAY_IP", "0.0.0.0")
-	gatewayPort := util.GetEnvOrDefault("TF_GATEWAY_PORT", "80")
+	gatewayIP := util.GetEnvOrDefault("GATEWAY_IP", "0.0.0.0")
+	gatewayPort := util.GetEnvOrDefault("GATEWAY_PORT", "80")
 	gatewayAddr := fmt.Sprintf("%s:%s", gatewayIP, gatewayPort)
 	r.SetGatewayAddr(gatewayAddr)
 	logger.Info("gateway url configured", zap.String("url", gatewayAddr))

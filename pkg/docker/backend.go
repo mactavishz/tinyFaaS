@@ -58,10 +58,10 @@ func New(tinyFaaSID string, logger *zap.Logger) *DockerBackend {
 	}
 
 	// Get gateway port from environment variable (same var used by the gateway service)
-	db.gatewayPort = os.Getenv("TF_GATEWAY_PORT")
+	db.gatewayPort = os.Getenv("GATEWAY_PORT")
 	if db.gatewayPort == "" {
 		db.gatewayPort = "80"
-		logger.Info("TF_GATEWAY_PORT not set, using default", zap.String("gatewayPort", db.gatewayPort))
+		logger.Info("GATEWAY_PORT not set, using default", zap.String("gatewayPort", db.gatewayPort))
 	}
 
 	// Note: Runtime base images must be pre-built using 'make build-runtime-images'

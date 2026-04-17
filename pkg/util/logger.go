@@ -8,7 +8,7 @@ import (
 
 func CreateLogger() *zap.Logger {
 	var logger *zap.Logger
-	if strings.ToLower(GetEnvOrDefault("TF_ENV", "development")) == "development" {
+	if strings.ToLower(GetEnvOrDefault("ENV", "development")) == "development" {
 		logger = zap.Must(zap.NewDevelopment())
 	} else {
 		logger = zap.Must(zap.NewProduction())

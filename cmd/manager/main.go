@@ -26,11 +26,11 @@ var (
 )
 
 func getManagerPort() string {
-	return util.GetEnvOrDefault("TF_MANAGER_PORT", "8080")
+	return util.GetEnvOrDefault("MANAGER_PORT", "8080")
 }
 
 func getRProxyPort() string {
-	return util.GetEnvOrDefault("TF_RPROXY_PORT", "8000")
+	return util.GetEnvOrDefault("RPROXY_PORT", "8000")
 }
 
 type managementService interface {
@@ -108,7 +108,7 @@ func main() {
 	id := uuid.New().String()
 
 	// find backend
-	backend := util.GetEnvOrDefault("TF_BACKEND", "docker")
+	backend := util.GetEnvOrDefault("BACKEND", "docker")
 	logger.Info("using runtime backend", zap.String("backend", backend))
 
 	var tfBackend manager.Backend

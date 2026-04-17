@@ -24,21 +24,21 @@ func main() {
 	logger := util.CreateLogger()
 	defer logger.Sync() // flushes buffer, if any
 
-	port := util.GetEnvOrDefault("TF_GATEWAY_PORT", DEFAULT_PROT)
-	ip := util.GetEnvOrDefault("TF_GATEWAY_IP", DEFAULT_IP)
+	port := util.GetEnvOrDefault("GATEWAY_PORT", DEFAULT_PROT)
+	ip := util.GetEnvOrDefault("GATEWAY_IP", DEFAULT_IP)
 	// Create gateway instance with options
 	var opts []gateway.Option
 
-	if rproxyPort := os.Getenv("TF_RPROXY_PORT"); rproxyPort != "" {
+	if rproxyPort := os.Getenv("RPROXY_PORT"); rproxyPort != "" {
 		opts = append(opts, gateway.WithRProxyPort(rproxyPort))
 	}
 
-	if managerPort := os.Getenv("TF_MANAGER_PORT"); managerPort != "" {
+	if managerPort := os.Getenv("MANAGER_PORT"); managerPort != "" {
 		opts = append(opts, gateway.WithManagerPort(managerPort))
 	}
 
 	// Get mode from environment variable
-	env := util.GetEnvOrDefault("TF_ENV", DEFAULT_MODE)
+	env := util.GetEnvOrDefault("ENV", DEFAULT_MODE)
 	logger.Info("Gateway ENV", zap.String("env", env))
 	opts = append(opts, gateway.WithMode(env))
 
