@@ -119,10 +119,6 @@ uninstall:
 	sudo rm -f $(SYSTEMD_DIR)/tf-manager.service $(SYSTEMD_DIR)/tf-rproxy.service $(SYSTEMD_DIR)/tf-gateway.service
 	@echo "Uninstall complete"
 
-.PHONY: up
-up:
-	./up.sh
-
 .PHONY: down
 down:
 	./down.sh
