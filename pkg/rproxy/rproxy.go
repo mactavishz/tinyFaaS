@@ -352,7 +352,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 
 	// Trigger prewarming for downstream functions (fire-and-forget, non-blocking)
 	// Prewarming requires both callgraph and autoscaler to be enabled
-	if calleeRoute.callgraphEnabled && r.autoscalerEnabled && r.tracker != nil {
+	if calleeRoute.callgraphEnabled && r.autoscalerEnabled && r.tracker != nil && r.tracker.PrewarmEnabled() {
 		go r.prewarmDownstream(name)
 	}
 

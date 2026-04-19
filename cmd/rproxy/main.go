@@ -68,10 +68,12 @@ func main() {
 	r.SetTracker(tracker)
 	if callGraphConfig.Enabled {
 		logger.Info("callgraph tracking enabled")
-		if callGraphConfig.Prewarm.Enabled && autoscalerConfig.Enabled {
+		if tracker.PrewarmEnabled() && autoscalerConfig.Enabled {
 			logger.Info("prewarming enabled")
-		} else if callGraphConfig.Prewarm.Enabled && !autoscalerConfig.Enabled {
+		} else if tracker.PrewarmEnabled() && !autoscalerConfig.Enabled {
 			logger.Warn("prewarming configured but autoscaler is disabled - prewarming will not work")
+		} else {
+			logger.Info("prewarming disabled")
 		}
 		switch callGraphConfig.Method {
 		case callgraph.ExponentialMovingAverage:
