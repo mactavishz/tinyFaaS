@@ -39,6 +39,8 @@ type RProxy struct {
 	// Shared HTTP client for internal requests (heartbeat, scale-up)
 	// Configured with connection pooling for efficient local communication
 	httpClient *http.Client
+	requestStartAddr  string
+	requestFinishAddr string
 	// Heartbeat worker: single goroutine sends batch heartbeats periodically
 	// Functions are added to pendingHeartbeats when invoked, and the worker
 	// flushes them to the manager at heartbeatInterval
@@ -123,6 +125,8 @@ func (r *RProxy) SetGatewayAddr(addr string) {
 	r.gatewayAddr = addr
 	r.heatbeatAddr = fmt.Sprintf("http://%s/system/heartbeat", addr)
 	r.scaleUpAddr = fmt.Sprintf("http://%s/system/scale-up", addr)
+	r.requestStartAddr = fmt.Sprintf("http://%s/system/request-start", addr)
+	r.requestFinishAddr = fmt.Sprintf("http://%s/system/request-finish", addr)
 	r.logger.Debug("gateway url set", zap.String("url", r.gatewayAddr))
 	r.logger.Debug("heartbeat url set", zap.String("url", r.heatbeatAddr))
 	r.logger.Debug("scale-up url set", zap.String("url", r.scaleUpAddr))
@@ -339,6 +343,12 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	}
 
 	r.queueHeartbeat(name)
+	if r.autoscalerEnabled {
+		if err := r.notifyRequestStart(name); err != nil {
+			r.logger.Error("failed to mark request start", zap.String("name", name), zap.Error(err))
+			return http.StatusServiceUnavailable, nil
+		}
+	}
 
 	// choose random handler
 	ip, err := calleeRoute.PickIP()
@@ -375,6 +385,13 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	// call function asynchronously
 	if async {
 		go func() {
+			if r.autoscalerEnabled {
+				defer func() {
+					if finishErr := r.notifyRequestFinish(name); finishErr != nil {
+						r.logger.Warn("failed to mark request finish", zap.String("name", name), zap.Error(finishErr))
+					}
+				}()
+			}
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				return
@@ -389,6 +406,14 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	}
 
 	// call function and return results
+	if r.autoscalerEnabled {
+		defer func() {
+			if err := r.notifyRequestFinish(name); err != nil {
+				r.logger.Warn("failed to mark request finish", zap.String("name", name), zap.Error(err))
+			}
+		}()
+	}
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		r.logger.Error("failed to invoke function", zap.Error(err))
@@ -689,5 +714,65 @@ func (r *RProxy) scaleUpFunction(name string, cold bool) error {
 		return err
 	}
 
+	return nil
+}
+
+func (r *RProxy) notifyRequestStart(name string) error {
+	reqData := struct {
+		FunctionName string `json:"name"`
+	}{
+		FunctionName: name,
+	}
+
+	body, err := json.Marshal(reqData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, r.requestStartAddr, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("request-start returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (r *RProxy) notifyRequestFinish(name string) error {
+	reqData := struct {
+		FunctionName string `json:"name"`
+	}{
+		FunctionName: name,
+	}
+
+	body, err := json.Marshal(reqData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, r.requestFinishAddr, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("request-finish returned status %d", resp.StatusCode)
+	}
 	return nil
 }

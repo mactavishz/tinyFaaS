@@ -39,9 +39,6 @@ func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 		return fmt.Errorf("failed to notify rproxy about scale down: %w", err)
 	}
 
-	op.ms.autoscaler.MarkScalingDown(functionName, true)
-	defer op.ms.autoscaler.MarkScalingDown(functionName, false)
-
 	// Measure scale-down time
 	startTime := time.Now()
 
@@ -170,26 +167,14 @@ func (ms *ManagementService) ScaleUp(functionName string, cold bool) error {
 		return fmt.Errorf("autoscaler not enabled")
 	}
 
-	if ms.autoscaler.IsScalingDown(functionName) {
-		return fmt.Errorf("function %s is currently scaling down", functionName)
-	}
-
-	if !ms.autoscaler.IsScaledDown(functionName) {
-		return fmt.Errorf("function %s is not scaled down", functionName)
-	}
-
 	// Measure scale-up time
 	startTime := time.Now()
 
-	// Scale up the function
 	if err := ms.autoscaler.ScaleUp(functionName); err != nil {
 		return err
 	}
 
 	scaleUpDuration := time.Since(startTime)
-
-	// Mark as scaled up in autoscaler
-	ms.autoscaler.MarkScaledDown(functionName, false)
 
 	// Record scale-up time to callgraph tracker via rproxy
 	ms.notifyScaleUp(functionName, startTime, scaleUpDuration, cold)
@@ -200,6 +185,22 @@ func (ms *ManagementService) ScaleUp(functionName string, cold bool) error {
 		zap.Duration("duration", scaleUpDuration))
 
 	return nil
+}
+
+// StartRequest marks a function as blocked while serving a request.
+func (ms *ManagementService) StartRequest(functionName string) error {
+	if ms.autoscaler == nil || !ms.autoscaler.IsEnabled() {
+		return nil
+	}
+	return ms.autoscaler.StartInvocation(functionName)
+}
+
+// EndRequest marks a function request completion.
+func (ms *ManagementService) EndRequest(functionName string) {
+	if ms.autoscaler == nil || !ms.autoscaler.IsEnabled() {
+		return
+	}
+	ms.autoscaler.EndInvocation(functionName)
 }
 
 // Heartbeat records activity for a function to prevent it from being scaled down

@@ -26,6 +26,9 @@ type mockManagementService struct {
 	uploadLabels      map[string]string
 	uploadResources   manager.FunctionResourceRequest
 	uploadErr         error
+	started           []string
+	finished          []string
+	startErr          error
 }
 
 func (f *mockManagementService) UploadArchive(name string, env string, replicas int, archivePath string, envs map[string]string, labels map[string]string, resources manager.FunctionResourceRequest) error {
@@ -72,6 +75,15 @@ func (f *mockManagementService) UrlUpload(string, string, int, string, string, m
 
 func (f *mockManagementService) ScaleUp(string, bool) error {
 	return nil
+}
+
+func (f *mockManagementService) StartRequest(name string) error {
+	f.started = append(f.started, name)
+	return f.startErr
+}
+
+func (f *mockManagementService) EndRequest(name string) {
+	f.finished = append(f.finished, name)
 }
 
 func (f *mockManagementService) Heartbeat(string) error {
@@ -184,6 +196,34 @@ func TestUploadHandlerMissingMetadata(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, recorder.Code)
 	assert.False(t, fakeMS.uploadCalled)
 	assert.Contains(t, recorder.Body.String(), "missing upload metadata")
+}
+
+func TestRequestStartHandler(t *testing.T) {
+	fakeMS := &mockManagementService{}
+	s := newTestServer(t, fakeMS)
+
+	body := bytes.NewBufferString(`{"name":"echo"}`)
+	req := httptest.NewRequest(http.MethodPost, "/request-start", body)
+	rec := httptest.NewRecorder()
+
+	s.startRequestHandler(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, []string{"echo"}, fakeMS.started)
+}
+
+func TestRequestFinishHandler(t *testing.T) {
+	fakeMS := &mockManagementService{}
+	s := newTestServer(t, fakeMS)
+
+	body := bytes.NewBufferString(`{"name":"echo"}`)
+	req := httptest.NewRequest(http.MethodPost, "/request-finish", body)
+	rec := httptest.NewRecorder()
+
+	s.endRequestHandler(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, []string{"echo"}, fakeMS.finished)
 }
 
 func TestUploadHandlerMissingZip(t *testing.T) {

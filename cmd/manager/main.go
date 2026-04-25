@@ -42,6 +42,8 @@ type managementService interface {
 	LogsFunction(name string) (io.Reader, error)
 	UrlUpload(name string, env string, replicas int, funcurl string, subfolder string, envs map[string]string, labels map[string]string, resources manager.FunctionResourceRequest) error
 	ScaleUp(functionName string, cold bool) error
+	StartRequest(functionName string) error
+	EndRequest(functionName string)
 	Heartbeat(functionName string) error
 	HeartbeatBatch(functionNames []string) error
 }
@@ -153,6 +155,8 @@ func main() {
 	r.HandleFunc("/logs", s.logsHandler)
 	r.HandleFunc("/uploadURL", s.urlUploadHandler)
 	r.HandleFunc("/scale-up", s.scaleUpHandler)
+	r.HandleFunc("/request-start", s.startRequestHandler)
+	r.HandleFunc("/request-finish", s.endRequestHandler)
 	r.HandleFunc("/heartbeat", s.heartbeatHandler)
 
 	// create HTTP server with graceful shutdown support
@@ -586,4 +590,68 @@ func (s *server) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "Heartbeat for function %s recorded\n", d.FunctionName)
 	s.logger.Debug("heartbeat recorded successfully", zap.String("name", d.FunctionName))
+}
+
+func (s *server) startRequestHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "invalid method, only POST allowed\n")
+		return
+	}
+
+	d := struct {
+		FunctionName string `json:"name"`
+	}{}
+
+	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "failed to decode request start request\n")
+		s.logger.Error("failed to decode request start request", zap.Error(err))
+		return
+	}
+
+	if strings.TrimSpace(d.FunctionName) == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "missing function name\n")
+		return
+	}
+
+	if err := s.ms.StartRequest(d.FunctionName); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "failed to mark request start\n")
+		s.logger.Error("failed to mark request start", zap.String("name", d.FunctionName), zap.Error(err))
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Request start for %s recorded\n", d.FunctionName)
+}
+
+func (s *server) endRequestHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "invalid method, only POST allowed\n")
+		return
+	}
+
+	d := struct {
+		FunctionName string `json:"name"`
+	}{}
+
+	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "failed to decode request finish request\n")
+		s.logger.Error("failed to decode request finish request", zap.Error(err))
+		return
+	}
+
+	if strings.TrimSpace(d.FunctionName) == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "missing function name\n")
+		return
+	}
+
+	s.ms.EndRequest(d.FunctionName)
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Request finish for %s recorded\n", d.FunctionName)
 }

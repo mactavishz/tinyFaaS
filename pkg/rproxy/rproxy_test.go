@@ -109,7 +109,13 @@ func TestCallWaitsForRouteReadyAfterScaleUp(t *testing.T) {
 	r.routingTableMux.Unlock()
 
 	scaleUpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		assert.Equal(t, "/system/scale-up", req.URL.Path)
+		if req.URL.Path != "/system/scale-up" && req.URL.Path != "/system/request-start" && req.URL.Path != "/system/request-finish" {
+			t.Fatalf("unexpected path: %s", req.URL.Path)
+		}
+		if req.URL.Path != "/system/scale-up" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 
 		go func() {
 			time.Sleep(100 * time.Millisecond)

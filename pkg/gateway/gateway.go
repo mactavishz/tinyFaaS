@@ -213,6 +213,32 @@ func (g *Gateway) HandleSystemHeartbeat(w http.ResponseWriter, r *http.Request) 
 	g.proxyRequest(w, r, g.managerAddr())
 }
 
+// HandleSystemRequestStart handles /system/request-start requests (restricted to localhost)
+func (g *Gateway) HandleSystemRequestStart(w http.ResponseWriter, r *http.Request) {
+	sourceIP := g.extractSourceIP(r)
+	if sourceIP != "127.0.0.1" && sourceIP != "::1" && sourceIP != "localhost" {
+		http.Error(w, "Forbidden: request-start endpoint is restricted to internal services only", http.StatusForbidden)
+		g.logger.Warn("unauthorized access to request-start endpoint", zap.String("sourceIP", sourceIP))
+		return
+	}
+
+	r.URL.Path = "/request-start"
+	g.proxyRequest(w, r, g.managerAddr())
+}
+
+// HandleSystemRequestFinish handles /system/request-finish requests (restricted to localhost)
+func (g *Gateway) HandleSystemRequestFinish(w http.ResponseWriter, r *http.Request) {
+	sourceIP := g.extractSourceIP(r)
+	if sourceIP != "127.0.0.1" && sourceIP != "::1" && sourceIP != "localhost" {
+		http.Error(w, "Forbidden: request-finish endpoint is restricted to internal services only", http.StatusForbidden)
+		g.logger.Warn("unauthorized access to request-finish endpoint", zap.String("sourceIP", sourceIP))
+		return
+	}
+
+	r.URL.Path = "/request-finish"
+	g.proxyRequest(w, r, g.managerAddr())
+}
+
 // HandleSystemOther handles other /system/* requests to manager
 func (g *Gateway) HandleSystemOther(w http.ResponseWriter, r *http.Request) {
 	// Strip /system prefix before forwarding to manager
@@ -265,6 +291,8 @@ func (g *Gateway) RegisterHandlers(mux *http.ServeMux) {
 	// System endpoints with access control
 	mux.HandleFunc("/system/scale-up", g.HandleSystemScaleUp)
 	mux.HandleFunc("/system/heartbeat", g.HandleSystemHeartbeat)
+	mux.HandleFunc("/system/request-start", g.HandleSystemRequestStart)
+	mux.HandleFunc("/system/request-finish", g.HandleSystemRequestFinish)
 
 	// Other system endpoints
 	mux.HandleFunc("/system/", g.HandleSystemOther)
