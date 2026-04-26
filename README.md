@@ -47,8 +47,8 @@ make down
 
 | Service | Default Bind | Purpose |
 | --- | --- | --- |
-| Gateway (`tf-gateway`) | `0.0.0.0:80` | Public entrypoint. Routes `/fn/*` and `/system/*`. |
-| Manager (`tf-manager`) | `127.0.0.1:8080` | Deploy/list/delete/logs/scale/heartbeat control plane. |
+| Gateway (`tf-gateway`) | `0.0.0.0:8080` | Public entrypoint. Routes `/fn/*` and `/system/*`. |
+| Manager (`tf-manager`) | `127.0.0.1:8001` | Deploy/list/delete/logs/scale/heartbeat control plane. |
 | RProxy (`tf-rproxy`) | `127.0.0.1:8000` | Invocation routing and callgraph/autoscaler integration. |
 
 Standard invocation path is through the gateway: `/fn/{name}`.
@@ -195,8 +195,8 @@ You can create a file at `/etc/default/tinyfaas` with environment variable overr
 | Environment Variable | Default | Description |
 | --- | --- | --- |
 | `GATEWAY_IP` | `0.0.0.0` | Gateway bind address. |
-| `GATEWAY_PORT` | `80` | Gateway port. |
-| `MANAGER_PORT` | `8080` | Manager port (loopback). |
+| `GATEWAY_PORT` | `8080` | Gateway port. |
+| `MANAGER_PORT` | `8001` | Manager port (loopback). |
 | `RPROXY_PORT` | `8000` | RProxy port (loopback). |
 | `ENV` | `development` | `development` enables callgraph debug endpoints. |
 | `BACKEND` | `docker` | Runtime backend. |
