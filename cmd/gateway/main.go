@@ -16,7 +16,7 @@ import (
 
 const (
 	DEFAULT_IP   = "0.0.0.0"
-	DEFAULT_PROT = "80"
+	DEFAULT_PROT = "8080"
 	DEFAULT_MODE = "development"
 )
 

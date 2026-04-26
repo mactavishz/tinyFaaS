@@ -26,7 +26,7 @@ var (
 )
 
 func getManagerPort() string {
-	return util.GetEnvOrDefault("MANAGER_PORT", "8080")
+	return util.GetEnvOrDefault("MANAGER_PORT", "8001")
 }
 
 func getRProxyPort() string {

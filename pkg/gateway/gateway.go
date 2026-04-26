@@ -13,7 +13,7 @@ import (
 
 const (
 	defaultRProxyPort  = "8000"
-	defaultManagerPort = "8080"
+	defaultManagerPort = "8001"
 )
 
 // Gateway handles incoming requests and routes them to appropriate backends
