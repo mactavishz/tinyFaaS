@@ -141,7 +141,7 @@ func TestGetManagerPort(t *testing.T) {
 
 	t.Run("falls back to default when unset", func(t *testing.T) {
 		t.Setenv("MANAGER_PORT", "")
-		assert.Equal(t, "8080", getManagerPort())
+		assert.Equal(t, "8001", getManagerPort())
 	})
 }
 
