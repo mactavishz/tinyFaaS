@@ -18,6 +18,7 @@ import (
 	"github.com/containerd/errdefs"
 	"go.uber.org/zap"
 
+	tflogs "github.com/OpenFogStack/tinyFaaS/pkg/logs"
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 )
 
@@ -26,6 +27,8 @@ const (
 	DEFAULT_PUBLIC_DOMAIN = "tinyfaas.com"
 	containerIPTimeout    = 10 * time.Second
 	containerIPInterval   = 25 * time.Millisecond
+
+	functionLogDriver = "journald"
 
 	containerReadyTimeout         = 10 * time.Second
 	containerHealthRequestTimeout = 100 * time.Millisecond
@@ -103,6 +106,12 @@ func (dh *dockerHandler) Start() error {
 				HostConfig: &container.HostConfig{
 					NetworkMode: container.NetworkMode(dh.networkName),
 					ExtraHosts:  dh.extraHosts,
+					LogConfig: container.LogConfig{
+						Type: functionLogDriver,
+						Config: map[string]string{
+							"tag": tflogs.JournalIdentifier(dh.name),
+						},
+					},
 					Resources: container.Resources{
 						NanoCPUs: dh.nanoCPUs,
 						Memory:   dh.memoryBytes,

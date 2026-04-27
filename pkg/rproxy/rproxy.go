@@ -38,7 +38,7 @@ type RProxy struct {
 	scaleUpAddr  string
 	// Shared HTTP client for internal requests (heartbeat, scale-up)
 	// Configured with connection pooling for efficient local communication
-	httpClient *http.Client
+	httpClient        *http.Client
 	requestStartAddr  string
 	requestFinishAddr string
 	// Heartbeat worker: single goroutine sends batch heartbeats periodically

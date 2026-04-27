@@ -422,6 +422,7 @@ func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if name != "" {
+		// TODO: distinguish between "function not found" error and other errors to return 404 vs 500
 		l, err := s.ms.LogsFunction(name)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)

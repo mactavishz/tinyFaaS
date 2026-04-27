@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	tflogs "github.com/OpenFogStack/tinyFaaS/pkg/logs"
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 	"github.com/google/uuid"
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
@@ -274,13 +275,13 @@ func (ms *ManagementService) Logs() (io.Reader, error) {
 func (ms *ManagementService) LogsFunction(name string) (io.Reader, error) {
 
 	ms.mux.Lock()
-	fh, ok := ms.functionHandlers[name]
+	_, ok := ms.functionHandlers[name]
 	ms.mux.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("function %s not found", name)
 	}
 
-	return fh.Logs()
+	return tflogs.ReadFunction(name)
 }
 
 func (ms *ManagementService) List() []FunctionConfig {
