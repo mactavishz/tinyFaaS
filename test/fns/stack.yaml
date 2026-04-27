@@ -1,0 +1,46 @@
+provider:
+  name: tinyfaas
+  gateway: ${TINYFAAS_GATEWAY_URL:-http://127.0.0.1:8080}
+functions:
+  echo-js:
+    lang: nodejs
+    handler: ./echo-js
+    limits:
+      cpu: 0.25
+      memory: 256Mi
+  echo-py:
+    lang: python3
+    handler: ./echo-py
+    limits:
+      cpu: 0.25
+      memory: 256Mi
+  echo-go:
+    lang: go
+    handler: ./echo-go
+    limits:
+      cpu: 0.25
+      memory: 256Mi
+  echo-binary:
+    lang: binary
+    handler: ./echo-binary
+    limits:
+      cpu: 0.25
+      memory: 256Mi
+  show-headers-js:
+    lang: nodejs
+    handler: ./show-headers-js
+    limits:
+      cpu: 0.25
+      memory: 256Mi
+  show-headers-py:
+    lang: python3
+    handler: ./show-headers-py
+    limits:
+      cpu: 0.25
+      memory: 256Mi
+  sieve-of-eratosthenes:
+    lang: nodejs
+    handler: ./sieve-of-eratosthenes
+    limits:
+      cpu: 0.25
+      memory: 256Mi
