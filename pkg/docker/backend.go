@@ -262,6 +262,10 @@ func (db *DockerBackend) Create(name string, env string, replicas int, filedir s
 		"tinyfaas-function": dh.name,
 		"tinyFaaS":          db.tinyFaaSID,
 	}
+	networkLabels := map[string]string{
+		"tinyfaas-function": dh.name,
+		"tinyFaaS":          db.tinyFaaSID,
+	}
 	for k, v := range labels {
 		containerLabels[k] = v
 	}
@@ -270,6 +274,7 @@ func (db *DockerBackend) Create(name string, env string, replicas int, filedir s
 	dh.envVars = e
 	dh.extraHosts = extraHosts
 	dh.containerLabels = containerLabels
+	dh.networkLabels = networkLabels
 
 	// NOTE: Containers are NOT created here - they will be created in Start()
 	// This ensures cold start measurement includes container creation time

@@ -2,6 +2,7 @@ package manager
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,7 +46,6 @@ type Handler interface {
 	IPs() []string
 	Start() error
 	Stop() error
-	StopContainers()
 	Restart() error
 	Destroy() error
 	Logs() (io.Reader, error)
@@ -90,8 +90,6 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 
 	ms.logger.Info("creating function", zap.String("name", name), zap.String("uuid", uuid.String()))
 
-	// create a new function handler
-
 	tempDir := path.Join(TmpDir, uuid.String())
 
 	err = os.MkdirAll(tempDir, 0777)
@@ -126,7 +124,8 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 	if err != nil {
 		return fmt.Errorf("invalid limits: %w", err)
 	}
-	// if function already exists, keep it while deploying the new version
+
+	// If the function already exists, keep it serving while the replacement is prepared.
 	var oldHandler Handler
 	ms.mux.Lock()
 	if existingHandler, ok := ms.functionHandlers[name]; ok {
@@ -134,22 +133,33 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 	}
 	ms.mux.Unlock()
 
-	// create new function handler (image build - not counted as cold start)
+	// Prepare the replacement handler before touching the current runtime.
 	fh, err := ms.backend.Create(name, env, replicas, tempDir, envs, labels, backendLimits)
 
 	if err != nil {
 		return err
 	}
 
-	// Measure cold start time (container creation and start)
+	if oldHandler != nil && ms.autoscaler != nil && ms.autoscaler.IsEnabled() {
+		if err := ms.autoscaler.ScaleDownWhenIdle(context.Background(), name); err != nil {
+			_ = fh.Destroy()
+			return fmt.Errorf("cannot safely scale down function %s for redeploy: %w", name, err)
+		}
+	}
+
+	// Measure cold start time for the replacement runtime start.
 	coldStartTime := time.Now()
 	err = fh.Start()
 	coldStartDuration := time.Since(coldStartTime)
 
 	if err != nil {
-		// containers did not start properly...
+		// deployment start failed; clean up unpublished replacement handler resources
 		ms.logger.Error("failed to start function containers", zap.String("function", name), zap.Error(err))
-		fh.StopContainers()
+		cleanupErr := fh.Destroy()
+		if cleanupErr != nil {
+			ms.logger.Error("failed to cleanup replacement handler after start failure", zap.String("function", name), zap.Error(cleanupErr))
+			return errors.Join(err, fmt.Errorf("cleanup failed: %w", cleanupErr))
+		}
 		return err
 	}
 

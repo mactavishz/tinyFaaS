@@ -13,7 +13,7 @@ func GatewayBaseURL() string {
 	if v := strings.TrimSpace(os.Getenv("TINYFAAS_TEST_GATEWAY_URL")); v != "" {
 		return v
 	}
-	return "http://127.0.0.1:8888"
+	return "http://127.0.0.1:8080"
 }
 
 func WaitForGateway(t *testing.T, baseURL string, timeout time.Duration) {

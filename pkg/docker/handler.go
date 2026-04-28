@@ -49,7 +49,8 @@ type dockerHandler struct {
 	filePath         string
 	client           *client.Client
 	network          string // per-function network ID
-	networkName      string // per-function network name
+	networkName      string // stable per-function network name
+	networkLabels    map[string]string
 	containers       []string
 	handlerIPs       []string
 	isRunning        bool               // track if containers are running
@@ -59,6 +60,7 @@ type dockerHandler struct {
 	envVars          []string           // store environment variables for container recreation
 	extraHosts       []string           // store extra hosts for container recreation
 	containerRemover func(string) error // optional override for tests
+	networkCreator   func() (string, error)
 	ipInspector      func(string) (string, error)
 	healthChecker    func(string) error
 	networkRemover   func() error // optional override for tests
@@ -86,6 +88,10 @@ func (dh *dockerHandler) Start() error {
 	if dh.isRunning {
 		dh.logger.Info("function is already started", zap.String("name", dh.name))
 		return nil
+	}
+
+	if err := dh.createNetwork(); err != nil {
+		return err
 	}
 
 	// Clear any old container IDs
@@ -121,7 +127,11 @@ func (dh *dockerHandler) Start() error {
 			},
 		)
 		if err != nil {
-			return fmt.Errorf("failed to create container %d: %w", i, err)
+			baseErr := fmt.Errorf("failed to create container %d: %w", i, err)
+			if rollbackErr := dh.rollback(); rollbackErr != nil {
+				return errors.Join(baseErr, fmt.Errorf("startup rollback failed: %w", rollbackErr))
+			}
+			return baseErr
 		}
 		dh.containers = append(dh.containers, containerResp.ID)
 	}
@@ -136,7 +146,11 @@ func (dh *dockerHandler) Start() error {
 		)
 		if err != nil {
 			dh.logger.Error("error starting container", zap.Error(err))
-			return fmt.Errorf("failed to start container %s: %w", util.GetShortID(cid), err)
+			baseErr := fmt.Errorf("failed to start container %s: %w", util.GetShortID(cid), err)
+			if rollbackErr := dh.rollback(); rollbackErr != nil {
+				return errors.Join(baseErr, fmt.Errorf("startup rollback failed: %w", rollbackErr))
+			}
+			return baseErr
 		}
 	}
 
@@ -192,8 +206,11 @@ func (dh *dockerHandler) Start() error {
 	}
 
 	if len(readinessErrors) > 0 {
-		dh.handlerIPs = nil
-		return fmt.Errorf("container readiness failed: %w", errors.Join(readinessErrors...))
+		baseErr := fmt.Errorf("container readiness failed: %w", errors.Join(readinessErrors...))
+		if rollbackErr := dh.rollback(); rollbackErr != nil {
+			return errors.Join(baseErr, fmt.Errorf("startup rollback failed: %w", rollbackErr))
+		}
+		return baseErr
 	}
 
 	dh.handlerIPs = handlerIPs
@@ -201,6 +218,74 @@ func (dh *dockerHandler) Start() error {
 	dh.logger.Debug("health check completed", zap.Int("total", len(dh.handlerIPs)))
 	dh.isRunning = true
 	dh.logger.Info("all containers started", zap.Int("count", len(dh.containers)))
+	return nil
+}
+
+func (dh *dockerHandler) rollback() error {
+	var cleanupErrors []error
+
+	if err := dh.removeContainers(); err != nil {
+		cleanupErrors = append(cleanupErrors, err)
+	}
+
+	if err := dh.removeNetwork(); err != nil {
+		cleanupErrors = append(cleanupErrors, err)
+	}
+
+	if len(cleanupErrors) > 0 {
+		return errors.Join(cleanupErrors...)
+	}
+
+	return nil
+}
+
+func (dh *dockerHandler) createNetwork() error {
+	if dh.network != "" {
+		return nil
+	}
+
+	if dh.networkName == "" {
+		dh.networkName = dh.uniqueName
+	}
+
+	create := dh.networkCreator
+	if create == nil {
+		create = func() (string, error) {
+			labels := dh.networkLabels
+			if len(labels) == 0 {
+				labels = map[string]string{
+					"tinyfaas-function": dh.name,
+				}
+			}
+
+			networkResp, err := dh.client.NetworkCreate(
+				context.Background(),
+				dh.networkName,
+				client.NetworkCreateOptions{
+					Driver:   "bridge",
+					Internal: false,
+					Labels:   labels,
+				},
+			)
+			if err != nil {
+				return "", err
+			}
+
+			return networkResp.ID, nil
+		}
+	}
+
+	networkID, err := create()
+	if err != nil {
+		return fmt.Errorf("failed to create network %s: %w", dh.networkName, err)
+	}
+
+	dh.network = networkID
+	dh.logger.Info("network ready",
+		zap.String("name", dh.name),
+		zap.String("network", util.GetShortID(networkID)),
+		zap.String("network_name", dh.networkName))
+
 	return nil
 }
 
@@ -333,35 +418,6 @@ func readinessBackoffDelay(attempt int) time.Duration {
 	return time.Duration(rand.Int63n(int64(delay)))
 }
 
-// StopContainers stops all function containers (used by cleanup during startup failures)
-func (dh *dockerHandler) StopContainers() {
-	dh.logger.Info("stopping all function containers", zap.String("name", dh.name))
-	wg := sync.WaitGroup{}
-	for _, c := range dh.containers {
-		wg.Add(1)
-		go func(cid string) {
-			defer wg.Done()
-
-			_, err := dh.client.ContainerStop(
-				context.Background(),
-				cid,
-				// default using timeout of 10 seconds
-				client.ContainerStopOptions{},
-			)
-			if err != nil {
-				dh.logger.Error("error stopping container", zap.String("ID", cid), zap.Error(err))
-			} else {
-				dh.logger.Info("container stopped")
-			}
-		}(c)
-	}
-	wg.Wait()
-	dh.handlerIPs = nil
-	dh.isRunning = false
-}
-
-// removeContainers stops and removes all function containers (used by scale-to-zero)
-// This frees up system resources by completely removing the containers
 func (dh *dockerHandler) removeContainers() error {
 	remove := dh.containerRemover
 	if remove == nil {
@@ -378,89 +434,11 @@ func (dh *dockerHandler) removeContainers() error {
 		}
 	}
 
-	return dh.cleanupContainers(remove)
-}
-
-func (dh *dockerHandler) Destroy() error {
-	dh.opMux.Lock()
-	defer dh.opMux.Unlock()
-	dh.logger.Info("destroying function", zap.String("name", dh.name))
-
-	var cleanupErrors []error
-	if err := dh.removeContainers(); err != nil {
-		cleanupErrors = append(cleanupErrors, err)
-	}
-
-	// Remove the per-function network
-	if dh.network != "" {
-		networkRemove := dh.networkRemover
-		if networkRemove == nil {
-			networkRemove = func() error {
-				_, err := dh.client.NetworkRemove(
-					context.Background(),
-					dh.network,
-					client.NetworkRemoveOptions{},
-				)
-				return err
-			}
-		}
-
-		err := networkRemove()
-		if err != nil {
-			if isNotFoundError(err) {
-				dh.logger.Info("network already removed", zap.String("network", util.GetShortID(dh.network)))
-			} else {
-				dh.logger.Error("error removing network", zap.String("network", util.GetShortID(dh.network)), zap.Error(err))
-				cleanupErrors = append(cleanupErrors, fmt.Errorf("network remove: %w", err))
-			}
-		} else {
-			dh.logger.Info("network removed", zap.String("network", util.GetShortID(dh.network)))
-		}
-		dh.network = ""
-		dh.networkName = ""
-	}
-
-	// remove image
-	// docker rmi <image>
-	imageRemove := dh.imageRemover
-	if imageRemove == nil {
-		imageRemove = func() error {
-			_, err := dh.client.ImageRemove(
-				context.Background(),
-				dh.uniqueName,
-				client.ImageRemoveOptions{
-					Force:         true,
-					PruneChildren: true,
-				},
-			)
-			return err
-		}
-	}
-	err := imageRemove()
-
-	if err != nil {
-		if isNotFoundError(err) {
-			dh.logger.Info("image already removed", zap.String("name", dh.name))
-		} else {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("image remove: %w", err))
-		}
-	} else {
-		dh.logger.Info("image removed", zap.String("name", dh.name))
-	}
-
-	if len(cleanupErrors) > 0 {
-		return fmt.Errorf("destroy cleanup failed: %w", errors.Join(cleanupErrors...))
-	}
-
-	return nil
-}
-
-func (dh *dockerHandler) cleanupContainers(removeFn func(string) error) error {
 	failedContainers := make([]string, 0)
 	cleanupErrors := make([]error, 0)
 
 	for _, cid := range dh.containers {
-		err := removeFn(cid)
+		err := remove(cid)
 		if err != nil {
 			if isNotFoundError(err) {
 				dh.logger.Info("container already removed", zap.String("ID", util.GetShortID(cid)))
@@ -482,6 +460,110 @@ func (dh *dockerHandler) cleanupContainers(removeFn func(string) error) error {
 
 	if len(cleanupErrors) > 0 {
 		return fmt.Errorf("container cleanup failed: %w", errors.Join(cleanupErrors...))
+	}
+
+	return nil
+}
+
+func (dh *dockerHandler) removeNetwork() error {
+	if dh.network != "" {
+		networkRemove := dh.networkRemover
+		if networkRemove == nil {
+			networkRemove = func() error {
+				_, err := dh.client.NetworkRemove(
+					context.Background(),
+					dh.network,
+					client.NetworkRemoveOptions{},
+				)
+				return err
+			}
+		}
+
+		err := networkRemove()
+		if err != nil {
+			if isNotFoundError(err) {
+				dh.logger.Info("network already removed", zap.String("network", util.GetShortID(dh.network)))
+			} else {
+				dh.logger.Error("error removing network", zap.String("network", util.GetShortID(dh.network)), zap.Error(err))
+				return fmt.Errorf("network remove: %w", err)
+			}
+		} else {
+			dh.logger.Info("network removed", zap.String("network", util.GetShortID(dh.network)))
+		}
+		dh.network = ""
+	}
+
+	return nil
+}
+
+func (dh *dockerHandler) removeImage() error {
+	imageRemove := dh.imageRemover
+	if imageRemove == nil {
+		imageRemove = func() error {
+			_, err := dh.client.ImageRemove(
+				context.Background(),
+				dh.uniqueName,
+				client.ImageRemoveOptions{
+					Force:         true,
+					PruneChildren: true,
+				},
+			)
+			return err
+		}
+	}
+	err := imageRemove()
+
+	if err != nil {
+		if isNotFoundError(err) {
+			dh.logger.Info("image already removed", zap.String("name", dh.name))
+		} else {
+			return fmt.Errorf("image remove: %w", err)
+		}
+	} else {
+		dh.logger.Info("image removed", zap.String("name", dh.name))
+	}
+
+	return nil
+}
+
+func (dh *dockerHandler) removeRuntime() error {
+	cleanupErrors := make([]error, 0)
+
+	if err := dh.removeContainers(); err != nil {
+		cleanupErrors = append(cleanupErrors, err)
+	}
+
+	if err := dh.removeNetwork(); err != nil {
+		cleanupErrors = append(cleanupErrors, err)
+	}
+
+	if len(cleanupErrors) > 0 {
+		return fmt.Errorf("runtime cleanup failed: %w", errors.Join(cleanupErrors...))
+	}
+
+	return nil
+}
+
+func (dh *dockerHandler) Destroy() error {
+	dh.opMux.Lock()
+	defer dh.opMux.Unlock()
+	dh.logger.Info("destroying function", zap.String("name", dh.name))
+
+	cleanupErrors := make([]error, 0)
+
+	if err := dh.removeRuntime(); err != nil {
+		cleanupErrors = append(cleanupErrors, err)
+	}
+
+	if err := dh.removeImage(); err != nil {
+		cleanupErrors = append(cleanupErrors, err)
+	}
+
+	// Destroy is terminal for this handler; clear network name to prevent accidental reuse.
+	dh.networkName = ""
+
+	if len(cleanupErrors) > 0 {
+		return fmt.Errorf("destroy cleanup failed: %w", errors.Join(cleanupErrors...))
 	}
 
 	return nil
@@ -555,19 +637,19 @@ func (dh *dockerHandler) Logs() (io.Reader, error) {
 	return &logs, nil
 }
 
-// Stop stops and deletes the function containers (for scale-to-zero)
-// Containers are removed to free up system resources, and will be recreated on scale-up
+// Stop scales the function to zero by removing runtime resources.
+// Containers and the per-function network are removed; the function image is kept.
 func (dh *dockerHandler) Stop() error {
 	dh.opMux.Lock()
 	defer dh.opMux.Unlock()
 
-	if !dh.isRunning && len(dh.containers) == 0 {
+	if !dh.isRunning && len(dh.containers) == 0 && dh.network == "" {
 		dh.logger.Info("function is already stopped", zap.String("name", dh.name))
 		return nil
 	}
 
-	dh.logger.Info("removing function containers", zap.String("name", dh.name))
-	if err := dh.removeContainers(); err != nil {
+	dh.logger.Info("scaling function to zero", zap.String("name", dh.name))
+	if err := dh.removeRuntime(); err != nil {
 		return err
 	}
 	dh.logger.Info("function scaled down", zap.String("name", dh.name))

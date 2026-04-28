@@ -14,14 +14,26 @@ import (
 
 func TestStopClearsTrackedContainersAfterScaleDown(t *testing.T) {
 	removed := make([]string, 0)
+	networkRemoved := false
+	imageRemoved := false
 	dh := &dockerHandler{
-		name:       "test-func",
-		containers: []string{"cid-a", "cid-b"},
-		handlerIPs: []string{"10.0.0.2", "10.0.0.3"},
-		isRunning:  true,
-		logger:     zap.NewNop(),
+		name:        "test-func",
+		containers:  []string{"cid-a", "cid-b"},
+		handlerIPs:  []string{"10.0.0.2", "10.0.0.3"},
+		isRunning:   true,
+		network:     "network-id",
+		networkName: "network-name",
+		logger:      zap.NewNop(),
 		containerRemover: func(cid string) error {
 			removed = append(removed, cid)
+			return nil
+		},
+		networkRemover: func() error {
+			networkRemoved = true
+			return nil
+		},
+		imageRemover: func() error {
+			imageRemoved = true
 			return nil
 		},
 	}
@@ -33,6 +45,10 @@ func TestStopClearsTrackedContainersAfterScaleDown(t *testing.T) {
 	assert.Empty(t, dh.containers)
 	assert.Nil(t, dh.handlerIPs)
 	assert.False(t, dh.isRunning)
+	assert.Equal(t, "", dh.network)
+	assert.Equal(t, "network-name", dh.networkName)
+	assert.True(t, networkRemoved)
+	assert.False(t, imageRemoved)
 }
 
 func TestDestroyAfterScaleDownIgnoresMissingResources(t *testing.T) {
@@ -63,24 +79,43 @@ func TestDestroyAfterScaleDownIgnoresMissingResources(t *testing.T) {
 	assert.False(t, dh.isRunning)
 }
 
-func TestCleanupTrackedContainersKeepsOnlyFailed(t *testing.T) {
+func TestRemoveTrackedContainersKeepsOnlyFailed(t *testing.T) {
 	dh := &dockerHandler{
 		containers: []string{"cid-a", "cid-b", "cid-c"},
 		isRunning:  true,
 		logger:     zap.NewNop(),
 	}
 
-	err := dh.cleanupContainers(func(cid string) error {
+	dh.containerRemover = func(cid string) error {
 		if cid == "cid-b" {
 			return errors.New("remove failed")
 		}
 		return nil
-	})
+	}
+	err := dh.removeContainers()
 	require.Error(t, err)
 
 	assert.Equal(t, []string{"cid-b"}, dh.containers)
 	assert.Nil(t, dh.handlerIPs)
 	assert.False(t, dh.isRunning)
+}
+
+func TestEnsureNetworkLockedCreatesNetworkWhenMissing(t *testing.T) {
+	dh := &dockerHandler{
+		name:          "test-func",
+		networkName:   "test-network",
+		networkLabels: map[string]string{"tinyfaas-function": "test-func"},
+		logger:        zap.NewNop(),
+	}
+
+	dh.networkCreator = func() (string, error) {
+		return "network-id", nil
+	}
+
+	err := dh.createNetwork()
+	require.NoError(t, err)
+	assert.Equal(t, "network-id", dh.network)
+	assert.Equal(t, "test-network", dh.networkName)
 }
 
 func TestLogsReturnsEmptyReaderWhenNoContainers(t *testing.T) {
