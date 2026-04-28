@@ -1,10 +1,12 @@
 module github.com/OpenFogStack/tinyFaaS
 
-go 1.24.0
+go 1.25.4
 
 require (
 	github.com/avast/retry-go/v5 v5.0.0
+	github.com/containerd/errdefs v1.0.0
 	github.com/google/uuid v1.6.0
+	github.com/mactavishz/FaaS-Platform-Knowledge-Optimization v0.0.0
 	github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler v0.0.0
 	github.com/moby/go-archive v0.2.0
 	github.com/moby/moby/api v1.53.0
@@ -16,10 +18,18 @@ require (
 
 require (
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
-	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
+	github.com/drone/envsubst v1.0.3 // indirect
+	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/moby/sys/userns v0.1.0 // indirect
+	github.com/openfaas/go-sdk v0.0.0 // indirect
+	github.com/ryanuber/go-glob v1.0.0 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
+	gopkg.in/inf.v0 v0.9.1 // indirect
+	k8s.io/apimachinery v0.34.1 // indirect
+	sigs.k8s.io/json v0.0.0-20241014173422-cfa47c3a1cc8 // indirect
 )
 
 require (
@@ -54,3 +64,7 @@ require (
 replace github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler => ../autoscaler
 
 replace github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/callgraph => ../callgraph
+
+replace github.com/mactavishz/FaaS-Platform-Knowledge-Optimization => ..
+
+replace github.com/openfaas/go-sdk => ../go-sdk

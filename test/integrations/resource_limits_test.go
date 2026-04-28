@@ -1,15 +1,15 @@
 package integrations
 
 import (
+	"encoding/json"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
-	"github.com/OpenFogStack/tinyFaaS/test/testutil"
+	testutil "github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/tests/integration/helpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,15 +20,19 @@ func TestResourceLimitsInList(t *testing.T) {
 	}
 
 	baseURL := testutil.RequireTinyFaaS(t)
-	fixturesDir := testutil.FunctionsDir(t)
+	stackPath := testutil.RepoRoot(t) + "/tinyFaaS/test/fns/stack.yaml"
+	fnName := "echo-go"
+	testutil.RemoveTinyFaaSStackFilter(t, baseURL, stackPath, fnName)
+	t.Cleanup(func() {
+		testutil.RemoveTinyFaaSStackFilter(t, baseURL, stackPath, fnName)
+	})
 
-	fnName := testutil.UniqueFunctionName("echo-go-resources")
-	testutil.CleanupDeleteFunction(t, baseURL, fnName)
+	testutil.DeployTinyFaaSStackFilterWithEnvs(t, baseURL, stackPath, fnName, map[string]string{
+		"ECHO_GO_LIMIT_CPU":    "50m",
+		"ECHO_GO_LIMIT_MEMORY": "96Mi",
+	})
 
-	limits := &manager.FunctionResources{CPU: "50m", Memory: "96Mi"}
-	testutil.UploadFixtureFunction(t, baseURL, filepath.Join(fixturesDir, "echo-go"), fnName, "go", 1, limits)
-
-	fn := testutil.GetFunction(t, baseURL, fnName)
+	fn := getFunctionFromSystemList(t, baseURL, fnName)
 	assert.Equal(t, fnName, fn.Name)
 
 	assert.Equal(t, "50m", fn.Limits.CPU)
@@ -48,10 +52,13 @@ func TestResourceLimitsInDocker(t *testing.T) {
 	}
 
 	baseURL := testutil.RequireTinyFaaS(t)
-	fixturesDir := testutil.FunctionsDir(t)
+	stackPath := testutil.RepoRoot(t) + "/tinyFaaS/test/fns/stack.yaml"
 
-	fnName := testutil.UniqueFunctionName("echo-go-docker-limits")
-	testutil.CleanupDeleteFunction(t, baseURL, fnName)
+	fnName := "echo-go"
+	testutil.RemoveTinyFaaSStackFilter(t, baseURL, stackPath, fnName)
+	t.Cleanup(func() {
+		testutil.RemoveTinyFaaSStackFilter(t, baseURL, stackPath, fnName)
+	})
 
 	cpuLimit := "50m"
 	memLimit := "96Mi"
@@ -60,10 +67,12 @@ func TestResourceLimitsInDocker(t *testing.T) {
 	expectedMemBytes, err := manager.ParseMemoryBytes(memLimit)
 	require.NoError(t, err)
 
-	limits := &manager.FunctionResources{CPU: cpuLimit, Memory: memLimit}
-	testutil.UploadFixtureFunction(t, baseURL, filepath.Join(fixturesDir, "echo-go"), fnName, "go", 1, limits)
+	testutil.DeployTinyFaaSStackFilterWithEnvs(t, baseURL, stackPath, fnName, map[string]string{
+		"ECHO_GO_LIMIT_CPU":    cpuLimit,
+		"ECHO_GO_LIMIT_MEMORY": memLimit,
+	})
 
-	status, body := testutil.Invoke(t, baseURL, fnName, http.MethodPost, []byte("Hello"), nil)
+	status, body := testutil.InvokeTinyFaaS(t, baseURL, fnName, http.MethodPost, []byte("Hello"), nil)
 	require.Equal(t, http.StatusOK, status)
 	require.Equal(t, []byte("Hello"), body)
 
@@ -207,4 +216,21 @@ func firstInt64(out string) (int64, bool) {
 		}
 	}
 	return 0, false
+}
+
+func getFunctionFromSystemList(t *testing.T, baseURL string, name string) manager.FunctionConfig {
+	t.Helper()
+
+	body := testutil.TinyFaaSSystemList(t, baseURL)
+	out := make([]manager.FunctionConfig, 0)
+	require.NoError(t, json.Unmarshal(body, &out), "invalid list JSON: %s", string(body))
+
+	for _, fn := range out {
+		if fn.Name == name {
+			return fn
+		}
+	}
+
+	t.Fatalf("function %q not found in /system/list", name)
+	return manager.FunctionConfig{}
 }

@@ -18,8 +18,8 @@ functions:
     lang: go
     handler: ./echo-go
     limits:
-      cpu: 0.25
-      memory: 256Mi
+      cpu: ${ECHO_GO_LIMIT_CPU:-0.25}
+      memory: ${ECHO_GO_LIMIT_MEMORY:-256Mi}
   echo-binary:
     lang: binary
     handler: ./echo-binary

@@ -3,11 +3,9 @@ package integrations
 import (
 	"encoding/json"
 	"net/http"
-	"path/filepath"
 	"testing"
 
-	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
-	"github.com/OpenFogStack/tinyFaaS/test/testutil"
+	testutil "github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/tests/integration/helpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -18,83 +16,80 @@ func TestExampleFunctions(t *testing.T) {
 	}
 
 	baseURL := testutil.RequireTinyFaaS(t)
-	fixturesDir := testutil.FunctionsDir(t)
+	stackPath := testutil.RepoRoot(t) + "/tinyFaaS/test/fns/stack.yaml"
 
-	resourceLimits := &manager.FunctionResources{
-		Memory: "256Mi",
-		CPU:    "500m",
+	deploy := func(t *testing.T, filter string) {
+		t.Helper()
+		testutil.RemoveTinyFaaSStackFilter(t, baseURL, stackPath, filter)
+		t.Cleanup(func() {
+			testutil.RemoveTinyFaaSStackFilter(t, baseURL, stackPath, filter)
+		})
+		testutil.DeployTinyFaaSStackFilter(t, baseURL, stackPath, filter)
 	}
 
 	t.Run("sieve", func(t *testing.T) {
-		fnName := testutil.UniqueFunctionName("sieve")
-		testutil.CleanupDeleteFunction(t, baseURL, fnName)
-		testutil.UploadFixtureFunction(t, baseURL, filepath.Join(fixturesDir, "sieve-of-eratosthenes"), fnName, "nodejs", 1, resourceLimits)
+		fnName := "sieve-of-eratosthenes"
+		deploy(t, fnName)
 
-		status, _ := testutil.Invoke(t, baseURL, fnName, http.MethodGet, nil, nil)
+		status, _ := testutil.InvokeTinyFaaS(t, baseURL, fnName, http.MethodGet, nil, nil)
 		assert.Equal(t, http.StatusOK, status)
 	})
 
 	t.Run("sieve-async", func(t *testing.T) {
-		fnName := testutil.UniqueFunctionName("sieve-async")
-		testutil.CleanupDeleteFunction(t, baseURL, fnName)
-		testutil.UploadFixtureFunction(t, baseURL, filepath.Join(fixturesDir, "sieve-of-eratosthenes"), fnName, "nodejs", 1, resourceLimits)
+		fnName := "sieve-of-eratosthenes"
+		deploy(t, fnName)
 
 		headers := map[string]string{"X-Tinyfaas-Async": "true"}
-		status, _ := testutil.Invoke(t, baseURL, fnName, http.MethodGet, nil, headers)
+		status, _ := testutil.InvokeTinyFaaS(t, baseURL, fnName, http.MethodGet, nil, headers)
 		assert.Equal(t, http.StatusAccepted, status)
 	})
 
 	t.Run("echo-py", func(t *testing.T) {
-		fnName := testutil.UniqueFunctionName("echo-py")
-		testutil.CleanupDeleteFunction(t, baseURL, fnName)
-		testutil.UploadFixtureFunction(t, baseURL, filepath.Join(fixturesDir, "echo-py"), fnName, "python3", 1, resourceLimits)
+		fnName := "echo-py"
+		deploy(t, fnName)
 
 		payload := []byte("Hello World!")
-		status, body := testutil.Invoke(t, baseURL, fnName, http.MethodPost, payload, nil)
+		status, body := testutil.InvokeTinyFaaS(t, baseURL, fnName, http.MethodPost, payload, nil)
 		assert.Equal(t, http.StatusOK, status)
 		assert.Equal(t, payload, body)
 	})
 
 	t.Run("echo-js", func(t *testing.T) {
-		fnName := testutil.UniqueFunctionName("echo-js")
-		testutil.CleanupDeleteFunction(t, baseURL, fnName)
-		testutil.UploadFixtureFunction(t, baseURL, filepath.Join(fixturesDir, "echo-js"), fnName, "nodejs", 1, resourceLimits)
+		fnName := "echo-js"
+		deploy(t, fnName)
 
 		payload := []byte("Hello World!")
-		status, body := testutil.Invoke(t, baseURL, fnName, http.MethodPost, payload, nil)
+		status, body := testutil.InvokeTinyFaaS(t, baseURL, fnName, http.MethodPost, payload, nil)
 		assert.Equal(t, http.StatusOK, status)
 		assert.Equal(t, payload, body)
 	})
 
 	t.Run("echo-go", func(t *testing.T) {
-		fnName := testutil.UniqueFunctionName("echo-go")
-		testutil.CleanupDeleteFunction(t, baseURL, fnName)
-		testutil.UploadFixtureFunction(t, baseURL, filepath.Join(fixturesDir, "echo-go"), fnName, "go", 1, resourceLimits)
+		fnName := "echo-go"
+		deploy(t, fnName)
 
 		payload := []byte("Hello World!")
-		status, body := testutil.Invoke(t, baseURL, fnName, http.MethodPost, payload, nil)
+		status, body := testutil.InvokeTinyFaaS(t, baseURL, fnName, http.MethodPost, payload, nil)
 		assert.Equal(t, http.StatusOK, status)
 		assert.Equal(t, payload, body)
 	})
 
 	t.Run("echo-binary", func(t *testing.T) {
-		fnName := testutil.UniqueFunctionName("echo-binary")
-		testutil.CleanupDeleteFunction(t, baseURL, fnName)
-		testutil.UploadFixtureFunction(t, baseURL, filepath.Join(fixturesDir, "echo-binary"), fnName, "binary", 1, resourceLimits)
+		fnName := "echo-binary"
+		deploy(t, fnName)
 
 		payload := []byte("Hello World!")
-		status, body := testutil.Invoke(t, baseURL, fnName, http.MethodPost, payload, nil)
+		status, body := testutil.InvokeTinyFaaS(t, baseURL, fnName, http.MethodPost, payload, nil)
 		assert.Equal(t, http.StatusOK, status)
 		assert.Equal(t, payload, body)
 	})
 
 	t.Run("show-headers-js", func(t *testing.T) {
-		fnName := testutil.UniqueFunctionName("headers-js")
-		testutil.CleanupDeleteFunction(t, baseURL, fnName)
-		testutil.UploadFixtureFunction(t, baseURL, filepath.Join(fixturesDir, "show-headers-js"), fnName, "nodejs", 1, resourceLimits)
+		fnName := "show-headers-js"
+		deploy(t, fnName)
 
 		headers := map[string]string{"lab": "scalable_software_systems_group"}
-		status, body := testutil.Invoke(t, baseURL, fnName, http.MethodGet, nil, headers)
+		status, body := testutil.InvokeTinyFaaS(t, baseURL, fnName, http.MethodGet, nil, headers)
 		require.Equal(t, http.StatusOK, status)
 
 		var got map[string]string
@@ -104,12 +99,11 @@ func TestExampleFunctions(t *testing.T) {
 	})
 
 	t.Run("show-headers-py", func(t *testing.T) {
-		fnName := testutil.UniqueFunctionName("headers-py")
-		testutil.CleanupDeleteFunction(t, baseURL, fnName)
-		testutil.UploadFixtureFunction(t, baseURL, filepath.Join(fixturesDir, "show-headers-py"), fnName, "python3", 1, resourceLimits)
+		fnName := "show-headers-py"
+		deploy(t, fnName)
 
 		headers := map[string]string{"Lab": "scalable_software_systems_group"}
-		status, body := testutil.Invoke(t, baseURL, fnName, http.MethodGet, nil, headers)
+		status, body := testutil.InvokeTinyFaaS(t, baseURL, fnName, http.MethodGet, nil, headers)
 		require.Equal(t, http.StatusOK, status)
 
 		var got map[string]string
