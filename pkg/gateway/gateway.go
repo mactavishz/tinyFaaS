@@ -297,13 +297,9 @@ func (g *Gateway) RegisterHandlers(mux *http.ServeMux) {
 	// Other system endpoints
 	mux.HandleFunc("/system/", g.HandleSystemOther)
 
-	// Debug endpoints (only in development mode)
-	if g.IsDev() {
-		g.logger.Info("registering development mode only endpoints")
-		mux.HandleFunc("/system/callgraph/function/", g.HandleCallgraphFunction)
-		mux.HandleFunc("/system/callgraph/edge", g.HandleCallgraphEdge)
-		mux.HandleFunc("/system/callgraph", g.HandleCallgraph)
-	}
+	mux.HandleFunc("/system/callgraph/function/", g.HandleCallgraphFunction)
+	mux.HandleFunc("/system/callgraph/edge", g.HandleCallgraphEdge)
+	mux.HandleFunc("/system/callgraph", g.HandleCallgraph)
 
 	// Health check
 	mux.HandleFunc("/health", g.HandleHealth)
