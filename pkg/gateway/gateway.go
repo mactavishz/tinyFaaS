@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,6 +24,7 @@ type Gateway struct {
 	managerPort string
 	mode        string
 	logger      *zap.Logger
+	stats       *functionStatsStore
 }
 
 // Option is a functional option for configuring Gateway
@@ -54,6 +57,7 @@ func New(logger *zap.Logger, opts ...Option) *Gateway {
 		rproxyPort:  defaultRProxyPort,
 		managerPort: defaultManagerPort,
 		logger:      logger,
+		stats:       NewFunctionStatsStore(),
 	}
 
 	for _, opt := range opts {
@@ -241,12 +245,37 @@ func (g *Gateway) HandleSystemRequestFinish(w http.ResponseWriter, r *http.Reque
 
 // HandleSystemOther handles other /system/* requests to manager
 func (g *Gateway) HandleSystemOther(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		trimmedPath := strings.TrimPrefix(r.URL.Path, "/system")
+		if trimmedPath == "/delete" {
+			g.resetStatsFromDeleteRequest(r)
+		}
+	}
 	// Strip /system prefix before forwarding to manager
 	r.URL.Path = strings.TrimPrefix(r.URL.Path, "/system")
 	if r.URL.Path == "" {
 		r.URL.Path = "/"
 	}
 	g.proxyRequest(w, r, g.managerAddr())
+}
+
+func (g *Gateway) resetStatsFromDeleteRequest(r *http.Request) {
+	if r.Body == nil {
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	var payload struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return
+	}
+	g.resetFunctionStats(payload.Name)
 }
 
 // HandleHealth handles /health requests
@@ -286,13 +315,14 @@ func (g *Gateway) HandleCallgraphEdge(w http.ResponseWriter, r *http.Request) {
 // RegisterHandlers registers all gateway handlers on the provided mux
 func (g *Gateway) RegisterHandlers(mux *http.ServeMux) {
 	// Function invocation endpoint
-	mux.HandleFunc("/fn/", g.InvokeMiddleware(g.HandleFunctionInvoke))
+	mux.Handle("/fn/", g.recordInvocationStats(g.InvokeMiddleware(g.HandleFunctionInvoke)))
 
 	// System endpoints with access control
 	mux.HandleFunc("/system/scale-up", g.HandleSystemScaleUp)
 	mux.HandleFunc("/system/heartbeat", g.HandleSystemHeartbeat)
 	mux.HandleFunc("/system/request-start", g.HandleSystemRequestStart)
 	mux.HandleFunc("/system/request-finish", g.HandleSystemRequestFinish)
+	mux.HandleFunc("/system/stats/function/", g.HandleFunctionStats)
 
 	// Other system endpoints
 	mux.HandleFunc("/system/", g.HandleSystemOther)

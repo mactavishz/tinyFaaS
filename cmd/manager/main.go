@@ -36,6 +36,7 @@ func getRProxyPort() string {
 type managementService interface {
 	UploadArchive(name string, env string, replicas int, archivePath string, envs map[string]string, labels map[string]string, resources manager.FunctionResourceRequest) error
 	Delete(name string) error
+	Get(name string) (manager.FunctionConfig, bool)
 	List() []manager.FunctionConfig
 	Wipe() error
 	Logs() (io.Reader, error)
@@ -151,6 +152,7 @@ func main() {
 	r.HandleFunc("/upload", s.uploadHandler)
 	r.HandleFunc("/delete", s.deleteHandler)
 	r.HandleFunc("/list", s.listHandler)
+	r.HandleFunc("/function/", s.functionHandler)
 	r.HandleFunc("/wipe", s.wipeHandler)
 	r.HandleFunc("/logs", s.logsHandler)
 	r.HandleFunc("/uploadURL", s.urlUploadHandler)
@@ -375,6 +377,30 @@ func (s *server) listHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(l)
+}
+
+func (s *server) functionHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "invalid method, only GET allowed\n")
+		return
+	}
+
+	name := strings.TrimPrefix(r.URL.Path, "/function/")
+	if strings.TrimSpace(name) == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "missing function name\n")
+		return
+	}
+
+	fn, ok := s.ms.Get(name)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(fn)
 }
 
 func (s *server) wipeHandler(w http.ResponseWriter, r *http.Request) {

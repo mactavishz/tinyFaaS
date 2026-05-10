@@ -300,3 +300,16 @@ func TestScaleDownWaitsForInFlightRequest(t *testing.T) {
 	assert.Equal(t, 1, rproxy.count(http.MethodPatch, "/config"))
 	assert.False(t, handler.IsRunning())
 }
+
+func TestGetReturnsFunctionConfig(t *testing.T) {
+	backend := newTestBackend()
+	ms, _ := newManagerWithRProxy(t, backend)
+	handler := &testHandler{name: "echo", ips: []string{"10.0.0.1"}, running: true}
+	ms.functionHandlers["echo"] = handler
+	ms.functionConfigs["echo"] = FunctionConfig{Name: "echo", Env: "python3"}
+
+	fn, ok := ms.Get("echo")
+	require.True(t, ok)
+	assert.Equal(t, "echo", fn.Name)
+	assert.True(t, fn.Running)
+}

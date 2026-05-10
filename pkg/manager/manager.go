@@ -294,6 +294,22 @@ func (ms *ManagementService) LogsFunction(name string) (io.Reader, error) {
 	return tflogs.ReadFunction(name)
 }
 
+func (ms *ManagementService) Get(name string) (FunctionConfig, bool) {
+	ms.mux.Lock()
+	defer ms.mux.Unlock()
+
+	h, ok := ms.functionHandlers[name]
+	if !ok {
+		return FunctionConfig{}, false
+	}
+	cfg, ok := ms.functionConfigs[name]
+	if !ok {
+		cfg = FunctionConfig{Name: name}
+	}
+	cfg.Running = h.IsRunning()
+	return cfg, true
+}
+
 func (ms *ManagementService) List() []FunctionConfig {
 	ms.logger.Info("listing functions")
 
