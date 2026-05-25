@@ -68,6 +68,14 @@ func main() {
 	r.SetTracker(tracker)
 	if callGraphConfig.Enabled {
 		logger.Info("callgraph tracking enabled")
+		switch callGraphConfig.Method {
+		case callgraph.SimpleMovingAverage:
+			logger.Info("callgraph method: Simple Moving Average")
+		case callgraph.ExponentialMovingAverage:
+			logger.Info("callgraph method: Exponential Moving Average")
+		default:
+			logger.Info("callgraph method: Unknown, defaulting to Simple Moving Average")
+		}
 		if tracker.PrewarmEnabled() && autoscalerConfig.Enabled {
 			logger.Info("prewarming enabled")
 		} else if tracker.PrewarmEnabled() && !autoscalerConfig.Enabled {
