@@ -2,7 +2,6 @@ package manager
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -141,7 +140,7 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 	}
 
 	if oldHandler != nil && ms.autoscaler != nil && ms.autoscaler.IsEnabled() {
-		if err := ms.autoscaler.ScaleDownWhenIdle(context.Background(), name); err != nil {
+		if err := ms.autoscaler.ScaleDownWhenIdle(name); err != nil {
 			_ = fh.Destroy()
 			return fmt.Errorf("cannot safely scale down function %s for redeploy: %w", name, err)
 		}

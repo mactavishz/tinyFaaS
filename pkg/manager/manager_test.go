@@ -3,7 +3,6 @@ package manager
 import (
 	"archive/zip"
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net"
@@ -285,7 +284,7 @@ func TestScaleDownWaitsForInFlightRequest(t *testing.T) {
 
 	scaleDownDone := make(chan error, 1)
 	go func() {
-		scaleDownDone <- as.ScaleDownWhenIdle(context.Background(), "echo")
+		scaleDownDone <- as.ScaleDownWhenIdle("echo")
 	}()
 
 	time.Sleep(80 * time.Millisecond)

@@ -9,8 +9,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
 	"log/slog"
+
+	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
 )
 
 // TinyFaaSScaleOp implements the autoscaler.ScaleOperation interface for tinyFaaS
@@ -170,7 +171,7 @@ func (ms *ManagementService) ScaleUp(functionName string, cold bool) error {
 	// Measure scale-up time
 	startTime := time.Now()
 
-	if err := ms.autoscaler.ScaleUp(functionName); err != nil {
+	if err := ms.autoscaler.ScaleUpWhenReady(functionName); err != nil {
 		return err
 	}
 
