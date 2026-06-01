@@ -5,7 +5,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -19,7 +19,7 @@ func CopyFileFromEmbed(src embed.FS, srcPath string, dstPath string) (err error)
 
 	_, err = os.Stat(dstPath)
 	if err == nil || !errors.Is(err, fs.ErrNotExist) {
-		log.Printf("Destination file %s already exists, skipping", dstPath)
+		slog.Debug("destination file already exists, skipping", "path", dstPath)
 		return
 	}
 

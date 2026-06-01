@@ -8,8 +8,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"go.uber.org/zap"
 )
 
 const DEFAULT_FUNCTION_NS = "tinyfaas"
@@ -166,7 +164,7 @@ func (g *Gateway) HandleFunctionStats(w http.ResponseWriter, r *http.Request) {
 	exists, err := g.functionExists(name)
 	if err != nil {
 		http.Error(w, "Failed to check function", http.StatusBadGateway)
-		g.logger.Error("failed to check function for stats", zap.String("name", name), zap.Error(err))
+		g.logger.Error("failed to check function for stats", "name", name, "err", err)
 		return
 	}
 	if !ok && !exists {

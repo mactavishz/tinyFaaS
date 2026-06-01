@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
 )
 
@@ -18,7 +19,7 @@ func main() {
 			if r.URL.Path == "/health" {
 				w.WriteHeader(http.StatusOK)
 				fmt.Fprint(w, "OK")
-				log.Println("reporting health: OK")
+				slog.Info("reporting health", "status", "OK")
 				return
 			}
 			w.WriteHeader(http.StatusNotFound)
@@ -48,9 +49,10 @@ func main() {
 		}
 	})
 
-	log.Printf("Server listening on port %s\n", port)
+	slog.Info("server listening", "port", port)
 	err := http.ListenAndServe(port, nil)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("failed to start server", "err", err)
+		os.Exit(1)
 	}
 }

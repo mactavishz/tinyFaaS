@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 const (
@@ -23,7 +23,7 @@ type Gateway struct {
 	rproxyPort  string
 	managerPort string
 	mode        string
-	logger      *zap.Logger
+	logger      *slog.Logger
 	stats       *functionStatsStore
 }
 
@@ -52,7 +52,7 @@ func WithMode(mode string) Option {
 }
 
 // New creates a new Gateway instance
-func New(logger *zap.Logger, opts ...Option) *Gateway {
+func New(logger *slog.Logger, opts ...Option) *Gateway {
 	g := &Gateway{
 		rproxyPort:  defaultRProxyPort,
 		managerPort: defaultManagerPort,
@@ -120,17 +120,17 @@ func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, targetAdd
 	proxyReq, err := http.NewRequest(r.Method, targetURL, r.Body)
 	if err != nil {
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
-		g.logger.Error("failed to create proxy request", zap.Error(err))
+		g.logger.Error("failed to create proxy request", "err", err)
 		return
 	}
 
 	// Copy headers from original request
 	proxyReq.Header = r.Header.Clone()
 
-	g.logger.Debug("proxying request",
-		zap.String("method", r.Method),
-		zap.String("path", r.URL.Path),
-		zap.String("targetAddr", targetURL),
+	g.logger.Info("Forwarding request",
+		"method", r.Method,
+		"path", r.URL.Path,
+		"targetAddr", targetURL,
 	)
 
 	// Send the request
@@ -138,7 +138,7 @@ func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, targetAdd
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		http.Error(w, "Failed to proxy request", http.StatusBadGateway)
-		g.logger.Error("failed to proxy request", zap.Error(err))
+		g.logger.Error("failed to proxy request", "err", err)
 		return
 	}
 	defer resp.Body.Close()
@@ -176,9 +176,9 @@ func (g *Gateway) InvokeMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		w.Header().Add("X-Start-Time", fmt.Sprintf("%d", start.UTC().UnixNano()))
 
 		g.logger.Debug("Invoke middleware",
-			zap.String("path", r.URL.Path),
-			zap.String("X-Source-Ip", r.Header.Get("X-Source-Ip")),
-			zap.String("X-Call-Id", r.Header.Get("X-Call-Id")))
+			"path", r.URL.Path,
+			"X-Source-Ip", r.Header.Get("X-Source-Ip"),
+			"X-Call-Id", r.Header.Get("X-Call-Id"))
 
 		next(w, r)
 	}
@@ -196,7 +196,7 @@ func (g *Gateway) HandleSystemScaleUp(w http.ResponseWriter, r *http.Request) {
 	sourceIP := g.extractSourceIP(r)
 	if sourceIP != "127.0.0.1" && sourceIP != "::1" && sourceIP != "localhost" {
 		http.Error(w, "Forbidden: scale-up endpoint is restricted to internal services only", http.StatusForbidden)
-		g.logger.Warn("unauthorized access to scale-up endpoint", zap.String("sourceIP", sourceIP))
+		g.logger.Warn("unauthorized access to scale-up endpoint", "sourceIP", sourceIP)
 		return
 	}
 
@@ -209,7 +209,7 @@ func (g *Gateway) HandleSystemHeartbeat(w http.ResponseWriter, r *http.Request) 
 	sourceIP := g.extractSourceIP(r)
 	if sourceIP != "127.0.0.1" && sourceIP != "::1" && sourceIP != "localhost" {
 		http.Error(w, "Forbidden: heartbeat endpoint is restricted to internal services only", http.StatusForbidden)
-		g.logger.Warn("unauthorized access to heartbeat endpoint", zap.String("sourceIP", sourceIP))
+		g.logger.Warn("unauthorized access to heartbeat endpoint", "sourceIP", sourceIP)
 		return
 	}
 
@@ -222,7 +222,7 @@ func (g *Gateway) HandleSystemRequestStart(w http.ResponseWriter, r *http.Reques
 	sourceIP := g.extractSourceIP(r)
 	if sourceIP != "127.0.0.1" && sourceIP != "::1" && sourceIP != "localhost" {
 		http.Error(w, "Forbidden: request-start endpoint is restricted to internal services only", http.StatusForbidden)
-		g.logger.Warn("unauthorized access to request-start endpoint", zap.String("sourceIP", sourceIP))
+		g.logger.Warn("unauthorized access to request-start endpoint", "sourceIP", sourceIP)
 		return
 	}
 
@@ -235,7 +235,7 @@ func (g *Gateway) HandleSystemRequestFinish(w http.ResponseWriter, r *http.Reque
 	sourceIP := g.extractSourceIP(r)
 	if sourceIP != "127.0.0.1" && sourceIP != "::1" && sourceIP != "localhost" {
 		http.Error(w, "Forbidden: request-finish endpoint is restricted to internal services only", http.StatusForbidden)
-		g.logger.Warn("unauthorized access to request-finish endpoint", zap.String("sourceIP", sourceIP))
+		g.logger.Warn("unauthorized access to request-finish endpoint", "sourceIP", sourceIP)
 		return
 	}
 

@@ -10,17 +10,17 @@ import (
 	"time"
 
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // TinyFaaSScaleOp implements the autoscaler.ScaleOperation interface for tinyFaaS
 type TinyFaaSScaleOp struct {
 	ms     *ManagementService
-	logger *zap.Logger
+	logger *slog.Logger
 }
 
 // NewTinyFaaSScaleOp creates a new TinyFaaSScaleOp
-func NewTinyFaaSScaleOp(ms *ManagementService, logger *zap.Logger) *TinyFaaSScaleOp {
+func NewTinyFaaSScaleOp(ms *ManagementService, logger *slog.Logger) *TinyFaaSScaleOp {
 	return &TinyFaaSScaleOp{ms: ms, logger: logger}
 }
 
@@ -35,7 +35,7 @@ func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 	}
 
 	if err := op.notifyRProxyClearIPs(functionName); err != nil {
-		op.logger.Error("failed to notify rproxy about scale down", zap.String("function", functionName), zap.Error(err))
+		op.logger.Error("failed to notify rproxy about scale down", "function", functionName, "err", err)
 		return fmt.Errorf("failed to notify rproxy about scale down: %w", err)
 	}
 
@@ -53,8 +53,8 @@ func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 	op.ms.notifyScaleDown(functionName, startTime, scaleDownDuration)
 
 	op.logger.Info("function scaled down",
-		zap.String("function", functionName),
-		zap.Duration("duration", scaleDownDuration))
+		"function", functionName,
+		"duration", scaleDownDuration)
 	return nil
 }
 
@@ -75,11 +75,11 @@ func (op *TinyFaaSScaleOp) ScaleUp(functionName string) error {
 
 	// Notify rproxy to add function back to routing table
 	if err := op.notifyRProxyAdd(functionName, handler.IPs()); err != nil {
-		op.logger.Error("failed to notify rproxy", zap.String("function", functionName), zap.Error(err))
+		op.logger.Error("failed to notify rproxy", "function", functionName, "err", err)
 		return fmt.Errorf("function restarted but rproxy notification failed: %w", err)
 	}
 
-	op.logger.Info("function scaled up", zap.String("function", functionName))
+	op.logger.Info("function scaled up", "function", functionName)
 	return nil
 }
 
@@ -180,9 +180,9 @@ func (ms *ManagementService) ScaleUp(functionName string, cold bool) error {
 	ms.notifyScaleUp(functionName, startTime, scaleUpDuration, cold)
 
 	ms.logger.Info("scale-up completed",
-		zap.String("function", functionName),
-		zap.Bool("cold", cold),
-		zap.Duration("duration", scaleUpDuration))
+		"function", functionName,
+		"cold", cold,
+		"duration", scaleUpDuration)
 
 	return nil
 }

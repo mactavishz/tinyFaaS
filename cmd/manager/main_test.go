@@ -13,8 +13,12 @@ import (
 	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
+	"log/slog"
 )
+
+func nopLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 type mockManagementService struct {
 	uploadCalled      bool
@@ -136,7 +140,7 @@ func newTestServer(t *testing.T, ms managementService) *server {
 		manager.TmpDir = oldTmpDir
 	})
 
-	return &server{ms: ms, logger: zap.NewNop()}
+	return &server{ms: ms, logger: nopLogger()}
 }
 
 func TestGetManagerPort(t *testing.T) {

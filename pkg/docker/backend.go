@@ -1,10 +1,12 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path"
+	"time"
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
@@ -13,8 +15,7 @@ import (
 	"github.com/moby/go-archive/compression"
 	"github.com/moby/moby/client"
 	"github.com/moby/moby/client/pkg/jsonmessage"
-	"github.com/moby/term"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 type DockerBackend struct {
@@ -23,15 +24,19 @@ type DockerBackend struct {
 	gatewayIP    string // host gateway IP for --add-host (where the Gateway runs)
 	publicDomain string // public domain for --add-host (e.g., tinyfaas.com)
 	gatewayPort  string // gateway port injected into containers as TINYFAAS_GATEWAY_URL
-	logger       *zap.Logger
+	logger       *slog.Logger
 }
 
-func New(tinyFaaSID string, logger *zap.Logger) *DockerBackend {
+func New(tinyFaaSID string, logger *slog.Logger) *DockerBackend {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	// create docker client
 	client, err := client.New(client.FromEnv)
 	if err != nil {
-		logger.Fatal("error creating docker client", zap.Error(err))
-		return nil
+		logger.Error("error creating docker client", "err", err)
+		os.Exit(1)
 	}
 
 	db := &DockerBackend{
@@ -44,7 +49,7 @@ func New(tinyFaaSID string, logger *zap.Logger) *DockerBackend {
 	db.publicDomain = os.Getenv("TINYFAAS_PUBLIC_DOMAIN")
 	if db.publicDomain == "" {
 		db.publicDomain = DEFAULT_PUBLIC_DOMAIN
-		logger.Info("TINYFAAS_PUBLIC_DOMAIN not set, using default", zap.String("publicDomain", db.publicDomain))
+		logger.Info("TINYFAAS_PUBLIC_DOMAIN not set, using default", "publicDomain", db.publicDomain)
 	}
 
 	// Get gateway IP from environment variable
@@ -54,14 +59,14 @@ func New(tinyFaaSID string, logger *zap.Logger) *DockerBackend {
 		// Default to host.docker.internal for Docker Desktop
 		// On Linux, this might need to be set explicitly to the host IP
 		db.gatewayIP = "host-gateway"
-		logger.Info("TINYFAAS_GATEWAY_IP not set, using default", zap.String("gatewayIP", db.gatewayIP))
+		logger.Info("TINYFAAS_GATEWAY_IP not set, using default", "gatewayIP", db.gatewayIP)
 	}
 
 	// Get gateway port from environment variable (same var used by the gateway service)
 	db.gatewayPort = os.Getenv("GATEWAY_PORT")
 	if db.gatewayPort == "" {
 		db.gatewayPort = "80"
-		logger.Info("GATEWAY_PORT not set, using default", zap.String("gatewayPort", db.gatewayPort))
+		logger.Info("GATEWAY_PORT not set, using default", "gatewayPort", db.gatewayPort)
 	}
 
 	// Note: Runtime base images must be pre-built using 'make build-runtime-images'
@@ -70,8 +75,8 @@ func New(tinyFaaSID string, logger *zap.Logger) *DockerBackend {
 
 	// Verify all runtime base images exist
 	if err := db.verifyRuntimeImages(); err != nil {
-		logger.Fatal("runtime base images not found, please run 'make build-runtime-images' first", zap.Error(err))
-		return nil
+		logger.Error("runtime base images not found, please run 'make build-runtime-images' first", "err", err)
+		os.Exit(1)
 	}
 
 	logger.Info("all runtime base images verified")
@@ -87,7 +92,7 @@ func (db *DockerBackend) verifyRuntimeImages() error {
 		if err != nil {
 			missing = append(missing, baseImageTag)
 		} else {
-			db.logger.Info("found runtime base image", zap.String("image", baseImageTag))
+			db.logger.Info("found runtime base image", "image", baseImageTag)
 		}
 	}
 
@@ -132,7 +137,7 @@ func (db *DockerBackend) Create(name string, env string, replicas int, filedir s
 	}
 
 	dh.uniqueName = name + "-" + uuid.String()
-	db.logger.Info("creating function", zap.String("name", dh.name))
+	db.logger.Info("creating function", "name", dh.name)
 
 	// Get runtime base image tag (verified at startup)
 	baseImageTag := db.getRuntimeBaseImage(dh.env)
@@ -158,7 +163,7 @@ func (db *DockerBackend) Create(name string, env string, replicas int, filedir s
 		return nil, err
 	}
 
-	db.logger.Info("Function runtime", zap.String("env", dh.env), zap.String("baseImage", baseImageTag))
+	db.logger.Info("Function runtime", "env", dh.env, "baseImage", baseImageTag)
 
 	// copy function into folder
 	// cp <file> <folder>/fn
@@ -179,7 +184,8 @@ func (db *DockerBackend) Create(name string, env string, replicas int, filedir s
 		return nil, err
 	}
 
-	db.logger.Info("building image", zap.String("name", dh.name))
+	buildStart := time.Now()
+	db.logger.Info("building image", "function", dh.name, "image", dh.uniqueName, "runtime", dh.env)
 	r, err := db.client.ImageBuild(
 		ctx,
 		tar,
@@ -198,25 +204,36 @@ func (db *DockerBackend) Create(name string, env string, replicas int, filedir s
 	}
 
 	defer r.Body.Close()
-	// _, err = io.Copy(io.Discard, r.Body)
-	// if err != nil {
-	// }
-	termFd, isTerminal := term.GetFdInfo(os.Stdout)
-
-	// 4. Use jsonmessage to print progress AND catch errors
-	// This function blocks until the stream is closed (build finished)
+	var buildLog bytes.Buffer
 	err = jsonmessage.DisplayJSONMessagesStream(
 		r.Body,
-		os.Stdout,
-		termFd,
-		isTerminal,
+		&buildLog,
+		0,
+		false,
 		nil, // auxCallback (optional: used to capture the final Image ID)
 	)
+	buildDuration := time.Since(buildStart)
+	if err != nil {
+		db.logger.Error("image build failed",
+			"function", dh.name,
+			"image", dh.uniqueName,
+			"runtime", dh.env,
+			"duration", buildDuration,
+			"err", err,
+			"build_log", buildLog.String())
+		return nil, fmt.Errorf("failed to build image %s: %w", dh.uniqueName, err)
+	}
+
+	db.logger.Info("image built",
+		"function", dh.name,
+		"image", dh.uniqueName,
+		"runtime", dh.env,
+		"duration", buildDuration)
 
 	// Create per-function isolated network
 	// Each function gets its own network, so functions cannot directly communicate with each other
 	// They can only reach the host via the gateway
-	db.logger.Info("creating isolated network", zap.String("name", dh.name))
+	db.logger.Info("creating isolated network", "name", dh.name)
 	networkResp, err := db.client.NetworkCreate(
 		ctx,
 		dh.uniqueName,
@@ -254,7 +271,7 @@ func (db *DockerBackend) Create(name string, env string, replicas int, filedir s
 	extraHosts := []string{}
 	if db.publicDomain != "" && db.gatewayIP != "" {
 		extraHosts = append(extraHosts, fmt.Sprintf("%s:%s", db.publicDomain, db.gatewayIP))
-		db.logger.Info("adding extra host", zap.String("host", db.publicDomain), zap.String("ip", db.gatewayIP))
+		db.logger.Info("adding extra host", "host", db.publicDomain, "ip", db.gatewayIP)
 	}
 
 	// Merge custom labels with system labels

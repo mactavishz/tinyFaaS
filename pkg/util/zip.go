@@ -6,12 +6,12 @@ import (
 	"os"
 	"path"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
-func Unzip(src string, dest string, logger *zap.Logger) error {
+func Unzip(src string, dest string, logger *slog.Logger) error {
 
-	logger.Info("Unzipping", zap.String("src", src), zap.String("dest", dest))
+	logger.Info("Unzipping", "src", src, "dest", dest)
 
 	archive, err := zip.OpenReader(src)
 	if err != nil {
@@ -20,11 +20,11 @@ func Unzip(src string, dest string, logger *zap.Logger) error {
 
 	// extract zip
 	for _, f := range archive.File {
-		logger.Info("Extracting", zap.String("file", f.Name))
+		logger.Info("Extracting", "file", f.Name)
 
 		if f.FileInfo().IsDir() {
 			path := path.Join(dest, f.Name)
-			logger.Info("Creating directory", zap.String("dir", f.Name), zap.String("path", path))
+			logger.Info("Creating directory", "dir", f.Name, "path", path)
 
 			err = os.MkdirAll(path, 0777)
 			if err != nil {
@@ -58,7 +58,7 @@ func Unzip(src string, dest string, logger *zap.Logger) error {
 			return err
 		}
 
-		logger.Info("Extracted file", zap.String("file", f.Name), zap.String("path", path))
+		logger.Info("Extracted file", "file", f.Name, "path", path)
 
 		// close
 		rc.Close()

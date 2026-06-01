@@ -18,7 +18,7 @@ import (
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 	"github.com/google/uuid"
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 var (
@@ -34,7 +34,7 @@ type ManagementService struct {
 	mux              sync.Mutex
 	rproxyPort       string
 	autoscaler       *autoscaler.AutoScaler
-	logger           *zap.Logger
+	logger           *slog.Logger
 }
 
 type Backend interface {
@@ -53,7 +53,7 @@ type Handler interface {
 	GetLabels() map[string]string
 }
 
-func New(id string, rproxyPort string, tfBackend Backend, logger *zap.Logger) *ManagementService {
+func New(id string, rproxyPort string, tfBackend Backend, logger *slog.Logger) *ManagementService {
 
 	ms := &ManagementService{
 		id:               id,
@@ -88,7 +88,7 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 		return err
 	}
 
-	ms.logger.Info("creating function", zap.String("name", name), zap.String("uuid", uuid.String()))
+	ms.logger.Info("creating function", "name", name, "uuid", uuid.String())
 
 	tempDir := path.Join(TmpDir, uuid.String())
 
@@ -98,7 +98,7 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 		return err
 	}
 
-	ms.logger.Info("created folder", zap.String("path", tempDir), zap.String("archivePath", archivePath))
+	ms.logger.Info("created folder", "path", tempDir, "archivePath", archivePath)
 
 	err = util.Unzip(archivePath, tempDir, ms.logger)
 
@@ -110,10 +110,10 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 		// remove folder
 		err = os.RemoveAll(tempDir)
 		if err != nil {
-			ms.logger.Error("error removing folder", zap.String("path", tempDir), zap.Error(err))
+			ms.logger.Error("error removing folder", "path", tempDir, "err", err)
 		}
 
-		ms.logger.Info("cleanup completed", zap.String("path", tempDir), zap.String("archivePath", archivePath))
+		ms.logger.Info("cleanup completed", "path", tempDir, "archivePath", archivePath)
 	}()
 
 	if subfolderPath != "" {
@@ -154,18 +154,18 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 
 	if err != nil {
 		// deployment start failed; clean up unpublished replacement handler resources
-		ms.logger.Error("failed to start function containers", zap.String("function", name), zap.Error(err))
+		ms.logger.Error("failed to start function containers", "function", name, "err", err)
 		cleanupErr := fh.Destroy()
 		if cleanupErr != nil {
-			ms.logger.Error("failed to cleanup replacement handler after start failure", zap.String("function", name), zap.Error(cleanupErr))
+			ms.logger.Error("failed to cleanup replacement handler after start failure", "function", name, "err", cleanupErr)
 			return errors.Join(err, fmt.Errorf("cleanup failed: %w", cleanupErr))
 		}
 		return err
 	}
 
 	ms.logger.Info("cold start completed",
-		zap.String("function", name),
-		zap.Duration("duration", coldStartDuration))
+		"function", name,
+		"duration", coldStartDuration)
 
 	// tell rproxy about the new function
 	// curl -X PUT http://<rproxyAddr>:<rproxyPort>/config -d '{"name": "<name>", "ips": ["<ip1>", "<ip2>"]}'
@@ -184,7 +184,7 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 		return err
 	}
 
-	ms.logger.Info("notify rproxy", zap.String("function", name), zap.Strings("ips", fh.IPs()))
+	ms.logger.Info("notify rproxy", "function", name, "ips", fh.IPs())
 
 	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%s/config", ms.rproxyPort), bytes.NewBuffer(b))
 	if err != nil {
@@ -194,18 +194,18 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil && !errors.Is(err, io.EOF) {
-		ms.logger.Error("error notifying rproxy", zap.String("function", name), zap.Error(err))
+		ms.logger.Error("error notifying rproxy", "function", name, "err", err)
 		return err
 	}
 	defer resp.Body.Close()
 
 	r, err := io.ReadAll(resp.Body)
 	if err != nil {
-		ms.logger.Error("error reading rproxy response", zap.String("function", name), zap.Error(err))
+		ms.logger.Error("error reading rproxy response", "function", name, "err", err)
 		return err
 	}
 
-	ms.logger.Info("rproxy response", zap.String("response", string(r)))
+	ms.logger.Info("rproxy response", "response", string(r))
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("failed to notify rproxy, status code %d", resp.StatusCode)
@@ -213,7 +213,7 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 
 	// If this is a redeployment, reset callgraph stats first before recording fresh cold start
 	if oldHandler != nil {
-		ms.logger.Info("notifying rproxy of callgraph reset for redeployment", zap.String("function", name))
+		ms.logger.Info("notifying rproxy of callgraph reset for redeployment", "function", name)
 		ms.notifyCallgraphReset(name)
 	}
 
@@ -267,7 +267,7 @@ func (ms *ManagementService) Logs() (io.Reader, error) {
 	for _, name := range names {
 		l, err := ms.LogsFunction(name)
 		if err != nil {
-			ms.logger.Error("error getting logs for function", zap.String("function", name), zap.Error(err))
+			ms.logger.Error("error getting logs for function", "function", name, "err", err)
 			return nil, err
 		}
 
@@ -340,7 +340,7 @@ func (ms *ManagementService) Wipe() error {
 	ms.mux.Unlock()
 
 	for _, name := range names {
-		ms.logger.Info("destroying function", zap.String("function", name))
+		ms.logger.Info("destroying function", "function", name)
 		_ = ms.Delete(name)
 	}
 
@@ -355,7 +355,7 @@ func (ms *ManagementService) Delete(name string) error {
 		return fmt.Errorf("function %s not found", name)
 	}
 
-	ms.logger.Info("deleting function", zap.String("function", name))
+	ms.logger.Info("deleting function", "function", name)
 	defer ms.mux.Unlock()
 
 	err := fh.Destroy()
@@ -375,7 +375,7 @@ func (ms *ManagementService) Delete(name string) error {
 		return err
 	}
 
-	ms.logger.Info("notify rproxy", zap.String("function", name))
+	ms.logger.Info("notify rproxy", "function", name)
 	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://127.0.0.1:%s/config", ms.rproxyPort), bytes.NewBuffer(b))
 	if err != nil {
 		return err
@@ -393,14 +393,14 @@ func (ms *ManagementService) Delete(name string) error {
 		return err
 	}
 
-	ms.logger.Info("rproxy response", zap.String("response", string(r)))
+	ms.logger.Info("rproxy response", "response", string(r))
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("rproxy returned status code %d", resp.StatusCode)
 	}
 
 	delete(ms.functionHandlers, name)
 	delete(ms.functionConfigs, name)
-	ms.logger.Info("function deleted", zap.String("function", name))
+	ms.logger.Info("function deleted", "function", name)
 
 	// Unregister from autoscaler
 	if ms.autoscaler != nil {
@@ -414,7 +414,7 @@ func (ms *ManagementService) UploadArchive(name string, env string, threads int,
 	err := ms.createFunction(name, env, threads, archivePath, "", envs, labels, resources)
 
 	if err != nil {
-		ms.logger.Error("error creating function", zap.String("function", name), zap.Error(err))
+		ms.logger.Error("error creating function", "function", name, "err", err)
 		return err
 	}
 
@@ -427,44 +427,44 @@ func (ms *ManagementService) UrlUpload(name string, env string, replicas int, fu
 	resp, err := http.Get(funcurl)
 	if err != nil {
 		// w.WriteHeader(http.StatusBadRequest)
-		ms.logger.Error("error downloading function zip", zap.String("url", funcurl), zap.Error(err))
+		ms.logger.Error("error downloading function zip", "url", funcurl, "err", err)
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		ms.logger.Error("error downloading function zip", zap.String("url", funcurl), zap.Int("statusCode", resp.StatusCode))
+		ms.logger.Error("error downloading function zip", "url", funcurl, "statusCode", resp.StatusCode)
 		return fmt.Errorf("unexpected status code downloading function zip: %d", resp.StatusCode)
 	}
 
 	archiveFile, err := createTempArchiveFile("url-upload")
 	if err != nil {
-		ms.logger.Error("error creating temporary archive file", zap.String("url", funcurl), zap.Error(err))
+		ms.logger.Error("error creating temporary archive file", "url", funcurl, "err", err)
 		return err
 	}
 	defer func() {
 		if err := os.Remove(archiveFile.Name()); err != nil && !os.IsNotExist(err) {
-			ms.logger.Error("error removing temporary archive file", zap.String("path", archiveFile.Name()), zap.Error(err))
+			ms.logger.Error("error removing temporary archive file", "path", archiveFile.Name(), "err", err)
 		}
 	}()
 
 	bytesWritten, err := io.Copy(archiveFile, resp.Body)
 	closeErr := archiveFile.Close()
 	if err != nil {
-		ms.logger.Error("error reading function zip", zap.String("url", funcurl), zap.Error(err))
+		ms.logger.Error("error reading function zip", "url", funcurl, "err", err)
 		return err
 	}
 	if closeErr != nil {
-		ms.logger.Error("error closing temporary archive file", zap.String("path", archiveFile.Name()), zap.Error(closeErr))
+		ms.logger.Error("error closing temporary archive file", "path", archiveFile.Name(), "err", closeErr)
 		return closeErr
 	}
 
-	ms.logger.Info("downloaded function archive", zap.String("url", funcurl), zap.Int64("bytes", bytesWritten), zap.String("path", archiveFile.Name()))
+	ms.logger.Info("downloaded function archive", "url", funcurl, "bytes", bytesWritten, "path", archiveFile.Name())
 
 	// create function handler
 	err = ms.createFunction(name, env, replicas, archiveFile.Name(), subfolder, envs, labels, resources)
 
 	if err != nil {
-		ms.logger.Error("error creating function", zap.String("function", name), zap.Error(err))
+		ms.logger.Error("error creating function", "function", name, "err", err)
 		return err
 	}
 
@@ -487,34 +487,34 @@ func (ms *ManagementService) notifyScaleUp(name string, timestamp time.Time, dur
 
 	body, err := json.Marshal(data)
 	if err != nil {
-		ms.logger.Error("failed to marshal scale-up data", zap.String("function", name), zap.Error(err))
+		ms.logger.Error("failed to marshal scale-up data", "function", name, "err", err)
 		return
 	}
 
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s/callgraph/scaleup", ms.rproxyPort), bytes.NewBuffer(body))
 	if err != nil {
-		ms.logger.Error("failed to create scale-up request", zap.String("function", name), zap.Bool("cold", cold), zap.Error(err))
+		ms.logger.Error("failed to create scale-up request", "function", name, "cold", cold, "err", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		ms.logger.Error("failed to notify rproxy of scale-up", zap.String("function", name), zap.Error(err))
+		ms.logger.Error("failed to notify rproxy of scale-up", "function", name, "err", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		ms.logger.Warn("rproxy scale-up notification failed",
-			zap.String("function", name),
-			zap.Int("statusCode", resp.StatusCode),
-			zap.Bool("cold", cold))
+			"function", name,
+			"statusCode", resp.StatusCode,
+			"cold", cold)
 	} else {
 		ms.logger.Debug("notified rproxy of scale-up",
-			zap.String("function", name),
-			zap.Duration("duration", duration),
-			zap.Bool("cold", cold))
+			"function", name,
+			"duration", duration,
+			"cold", cold)
 	}
 }
 
@@ -532,32 +532,32 @@ func (ms *ManagementService) notifyScaleDown(name string, timestamp time.Time, d
 
 	body, err := json.Marshal(data)
 	if err != nil {
-		ms.logger.Error("failed to marshal scale-down data", zap.String("function", name), zap.Error(err))
+		ms.logger.Error("failed to marshal scale-down data", "function", name, "err", err)
 		return
 	}
 
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s/callgraph/scaledown", ms.rproxyPort), bytes.NewBuffer(body))
 	if err != nil {
-		ms.logger.Error("failed to create scale-down request", zap.String("function", name), zap.Error(err))
+		ms.logger.Error("failed to create scale-down request", "function", name, "err", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		ms.logger.Error("failed to notify rproxy of scale-down", zap.String("function", name), zap.Error(err))
+		ms.logger.Error("failed to notify rproxy of scale-down", "function", name, "err", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		ms.logger.Warn("rproxy scale-down notification failed",
-			zap.String("function", name),
-			zap.Int("statusCode", resp.StatusCode))
+			"function", name,
+			"statusCode", resp.StatusCode)
 	} else {
 		ms.logger.Debug("notified rproxy of scale-down",
-			zap.String("function", name),
-			zap.Duration("duration", duration))
+			"function", name,
+			"duration", duration)
 	}
 }
 
@@ -571,31 +571,31 @@ func (ms *ManagementService) notifyCallgraphReset(name string) {
 
 	body, err := json.Marshal(data)
 	if err != nil {
-		ms.logger.Error("failed to marshal callgraph reset data", zap.String("function", name), zap.Error(err))
+		ms.logger.Error("failed to marshal callgraph reset data", "function", name, "err", err)
 		return
 	}
 
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s/callgraph/reset", ms.rproxyPort), bytes.NewBuffer(body))
 	if err != nil {
-		ms.logger.Error("failed to create callgraph reset request", zap.String("function", name), zap.Error(err))
+		ms.logger.Error("failed to create callgraph reset request", "function", name, "err", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		ms.logger.Error("failed to notify rproxy of callgraph reset", zap.String("function", name), zap.Error(err))
+		ms.logger.Error("failed to notify rproxy of callgraph reset", "function", name, "err", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		ms.logger.Warn("rproxy callgraph reset notification failed",
-			zap.String("function", name),
-			zap.Int("statusCode", resp.StatusCode))
+			"function", name,
+			"statusCode", resp.StatusCode)
 	} else {
 		ms.logger.Info("notified rproxy of callgraph reset for redeployment",
-			zap.String("function", name))
+			"function", name)
 	}
 }
 

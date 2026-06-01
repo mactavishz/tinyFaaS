@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"plugin"
@@ -14,18 +14,21 @@ var Handle func([]byte, map[string]string) (string, error)
 func init() {
 	p, err := plugin.Open("/usr/src/app/fn/handler.so")
 	if err != nil {
-		log.Fatalf("Failed to open plugin: %v", err)
+		slog.Error("failed to open plugin", "err", err)
+		os.Exit(1)
 	}
 
 	sym, err := p.Lookup("Handle")
 	if err != nil {
-		log.Fatalf("Failed to lookup Handle symbol: %v", err)
+		slog.Error("failed to lookup Handle symbol", "err", err)
+		os.Exit(1)
 	}
 
 	var ok bool
 	Handle, ok = sym.(func([]byte, map[string]string) (string, error))
 	if !ok {
-		log.Fatalf("Handle has wrong signature")
+		slog.Error("Handle has wrong signature")
+		os.Exit(1)
 	}
 }
 
@@ -41,7 +44,7 @@ func main() {
 			if r.URL.Path == "/health" {
 				w.WriteHeader(http.StatusOK)
 				fmt.Fprint(w, "OK")
-				log.Println("reporting health: OK")
+				slog.Info("reporting health", "status", "OK")
 				return
 			}
 			w.WriteHeader(http.StatusNotFound)
@@ -79,8 +82,9 @@ func main() {
 		}
 	})
 
-	log.Printf("Server starting on port %s\n", port)
+	slog.Info("server starting", "port", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+		slog.Error("failed to start server", "err", err)
+		os.Exit(1)
 	}
 }

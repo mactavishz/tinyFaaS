@@ -9,8 +9,12 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
+	"log/slog"
 )
+
+func nopLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 func TestStopClearsTrackedContainersAfterScaleDown(t *testing.T) {
 	removed := make([]string, 0)
@@ -23,7 +27,7 @@ func TestStopClearsTrackedContainersAfterScaleDown(t *testing.T) {
 		isRunning:   true,
 		network:     "network-id",
 		networkName: "network-name",
-		logger:      zap.NewNop(),
+		logger:      nopLogger(),
 		containerRemover: func(cid string) error {
 			removed = append(removed, cid)
 			return nil
@@ -58,7 +62,7 @@ func TestDestroyAfterScaleDownIgnoresMissingResources(t *testing.T) {
 		networkName: "network-name",
 		uniqueName:  "image-name",
 		containers:  []string{"cid-a", "cid-b"},
-		logger:      zap.NewNop(),
+		logger:      nopLogger(),
 		containerRemover: func(string) error {
 			return errdefs.ErrNotFound
 		},
@@ -83,7 +87,7 @@ func TestRemoveTrackedContainersKeepsOnlyFailed(t *testing.T) {
 	dh := &dockerHandler{
 		containers: []string{"cid-a", "cid-b", "cid-c"},
 		isRunning:  true,
-		logger:     zap.NewNop(),
+		logger:     nopLogger(),
 	}
 
 	dh.containerRemover = func(cid string) error {
@@ -105,7 +109,7 @@ func TestEnsureNetworkLockedCreatesNetworkWhenMissing(t *testing.T) {
 		name:          "test-func",
 		networkName:   "test-network",
 		networkLabels: map[string]string{"tinyfaas-function": "test-func"},
-		logger:        zap.NewNop(),
+		logger:        nopLogger(),
 	}
 
 	dh.networkCreator = func() (string, error) {
@@ -121,7 +125,7 @@ func TestEnsureNetworkLockedCreatesNetworkWhenMissing(t *testing.T) {
 func TestLogsReturnsEmptyReaderWhenNoContainers(t *testing.T) {
 	dh := &dockerHandler{
 		containers: nil,
-		logger:     zap.NewNop(),
+		logger:     nopLogger(),
 	}
 
 	r, err := dh.Logs()
@@ -135,7 +139,7 @@ func TestLogsReturnsEmptyReaderWhenNoContainers(t *testing.T) {
 func TestWaitForContainerIPRetriesUntilAvailable(t *testing.T) {
 	attempts := 0
 	dh := &dockerHandler{
-		logger: zap.NewNop(),
+		logger: nopLogger(),
 		ipInspector: func(string) (string, error) {
 			attempts++
 			if attempts < 3 {
@@ -153,7 +157,7 @@ func TestWaitForContainerIPRetriesUntilAvailable(t *testing.T) {
 
 func TestWaitForContainerIPTimesOut(t *testing.T) {
 	dh := &dockerHandler{
-		logger: zap.NewNop(),
+		logger: nopLogger(),
 		ipInspector: func(string) (string, error) {
 			return "", errors.New("network not ready")
 		},
@@ -167,7 +171,7 @@ func TestWaitForContainerIPTimesOut(t *testing.T) {
 func TestWaitForContainerReadyRetriesUntilHealthy(t *testing.T) {
 	attempts := 0
 	dh := &dockerHandler{
-		logger: zap.NewNop(),
+		logger: nopLogger(),
 		healthChecker: func(string) error {
 			attempts++
 			if attempts < 3 {
@@ -184,7 +188,7 @@ func TestWaitForContainerReadyRetriesUntilHealthy(t *testing.T) {
 
 func TestWaitForContainerReadyTimesOut(t *testing.T) {
 	dh := &dockerHandler{
-		logger: zap.NewNop(),
+		logger: nopLogger(),
 		healthChecker: func(string) error {
 			return errors.New("still starting")
 		},

@@ -16,7 +16,7 @@ import (
 	"github.com/moby/moby/client"
 
 	"github.com/containerd/errdefs"
-	"go.uber.org/zap"
+	"log/slog"
 
 	tflogs "github.com/OpenFogStack/tinyFaaS/pkg/logs"
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
@@ -65,7 +65,7 @@ type dockerHandler struct {
 	healthChecker    func(string) error
 	networkRemover   func() error // optional override for tests
 	imageRemover     func() error // optional override for tests
-	logger           *zap.Logger
+	logger           *slog.Logger
 }
 
 type readinessResult struct {
@@ -86,7 +86,7 @@ func (dh *dockerHandler) Start() error {
 	ctx := context.Background()
 
 	if dh.isRunning {
-		dh.logger.Info("function is already started", zap.String("name", dh.name))
+		dh.logger.Info("function is already started", "name", dh.name)
 		return nil
 	}
 
@@ -100,7 +100,7 @@ func (dh *dockerHandler) Start() error {
 
 	// Create containers from image
 	for i := 0; i < dh.replicas; i++ {
-		dh.logger.Info("creating function container", zap.String("name", dh.name), zap.Int("replica", i+1))
+		dh.logger.Info("creating function container", "name", dh.name, "replica", i+1)
 		containerResp, err := dh.client.ContainerCreate(
 			ctx,
 			client.ContainerCreateOptions{
@@ -138,14 +138,14 @@ func (dh *dockerHandler) Start() error {
 
 	for _, cid := range dh.containers {
 		// Start container
-		dh.logger.Info("starting container", zap.String("ID", util.GetShortID(cid)))
+		dh.logger.Info("starting container", "ID", util.GetShortID(cid))
 		_, err := dh.client.ContainerStart(
 			context.Background(),
 			cid,
 			client.ContainerStartOptions{},
 		)
 		if err != nil {
-			dh.logger.Error("error starting container", zap.Error(err))
+			dh.logger.Error("error starting container", "err", err)
 			baseErr := fmt.Errorf("failed to start container %s: %w", util.GetShortID(cid), err)
 			if rollbackErr := dh.rollback(); rollbackErr != nil {
 				return errors.Join(baseErr, fmt.Errorf("startup rollback failed: %w", rollbackErr))
@@ -164,8 +164,8 @@ func (dh *dockerHandler) Start() error {
 				return
 			}
 
-			dh.logger.Info("container IP", zap.String("ip", ip))
-			dh.logger.Info("waiting for container to be ready", zap.String("ip", ip))
+			dh.logger.Info("container IP", "ip", ip)
+			dh.logger.Info("waiting for container to be ready", "ip", ip)
 
 			err = dh.waitForContainerReady(ip, containerID, containerReadyTimeout)
 			if err != nil {
@@ -186,16 +186,16 @@ func (dh *dockerHandler) Start() error {
 			containerID := dh.containers[res.index]
 			dh.logger.Error(
 				"container failed readiness checks",
-				zap.String("ID", util.GetShortID(containerID)),
-				zap.String("ip", res.ip),
-				zap.Error(res.err),
+				"ID", util.GetShortID(containerID),
+				"ip", res.ip,
+				"err", res.err,
 			)
 
 			logs, logErr := dh.getContainerLogs(containerID)
 			if logErr != nil {
-				dh.logger.Error("error getting logs for container", zap.String("ID", util.GetShortID(containerID)), zap.Error(logErr))
+				dh.logger.Error("error getting logs for container", "ID", util.GetShortID(containerID), "err", logErr)
 			} else {
-				dh.logger.Info("logs for container", zap.String("ID", util.GetShortID(containerID)), zap.String("logs", logs))
+				dh.logger.Info("logs for container", "ID", util.GetShortID(containerID), "logs", logs)
 			}
 
 			readinessErrors = append(readinessErrors, fmt.Errorf("container %s: %w", util.GetShortID(containerID), res.err))
@@ -215,9 +215,9 @@ func (dh *dockerHandler) Start() error {
 
 	dh.handlerIPs = handlerIPs
 
-	dh.logger.Debug("health check completed", zap.Int("total", len(dh.handlerIPs)))
+	dh.logger.Debug("health check completed", "total", len(dh.handlerIPs))
 	dh.isRunning = true
-	dh.logger.Info("all containers started", zap.Int("count", len(dh.containers)))
+	dh.logger.Info("all containers started", "count", len(dh.containers))
 	return nil
 }
 
@@ -282,9 +282,9 @@ func (dh *dockerHandler) createNetwork() error {
 
 	dh.network = networkID
 	dh.logger.Info("network ready",
-		zap.String("name", dh.name),
-		zap.String("network", util.GetShortID(networkID)),
-		zap.String("network_name", dh.networkName))
+		"name", dh.name,
+		"network", util.GetShortID(networkID),
+		"network_name", dh.networkName)
 
 	return nil
 }
@@ -348,16 +348,16 @@ func (dh *dockerHandler) waitForContainerReady(ip string, containerID string, ti
 	for {
 		err := dh.probeContainerHealth(ip)
 		if err == nil {
-			dh.logger.Info("container is ready", zap.String("ip", ip))
+			dh.logger.Info("container is ready", "ip", ip)
 			return nil
 		}
 
 		lastErr = err
 		dh.logger.Debug(
 			"ready check attempt failed",
-			zap.Int("attempt", attempt+1),
-			zap.String("ip", ip),
-			zap.Error(err),
+			"attempt", attempt+1,
+			"ip", ip,
+			"err", err,
 		)
 
 		if time.Now().After(deadline) {
@@ -441,17 +441,17 @@ func (dh *dockerHandler) removeContainers() error {
 		err := remove(cid)
 		if err != nil {
 			if isNotFoundError(err) {
-				dh.logger.Info("container already removed", zap.String("ID", util.GetShortID(cid)))
+				dh.logger.Info("container already removed", "ID", util.GetShortID(cid))
 				continue
 			}
 
-			dh.logger.Error("error removing container", zap.String("ID", util.GetShortID(cid)), zap.Error(err))
+			dh.logger.Error("error removing container", "ID", util.GetShortID(cid), "err", err)
 			failedContainers = append(failedContainers, cid)
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("container %s: %w", util.GetShortID(cid), err))
 			continue
 		}
 
-		dh.logger.Info("container removed", zap.String("ID", util.GetShortID(cid)))
+		dh.logger.Info("container removed", "ID", util.GetShortID(cid))
 	}
 
 	dh.containers = failedContainers
@@ -482,13 +482,13 @@ func (dh *dockerHandler) removeNetwork() error {
 		err := networkRemove()
 		if err != nil {
 			if isNotFoundError(err) {
-				dh.logger.Info("network already removed", zap.String("network", util.GetShortID(dh.network)))
+				dh.logger.Info("network already removed", "network", util.GetShortID(dh.network))
 			} else {
-				dh.logger.Error("error removing network", zap.String("network", util.GetShortID(dh.network)), zap.Error(err))
+				dh.logger.Error("error removing network", "network", util.GetShortID(dh.network), "err", err)
 				return fmt.Errorf("network remove: %w", err)
 			}
 		} else {
-			dh.logger.Info("network removed", zap.String("network", util.GetShortID(dh.network)))
+			dh.logger.Info("network removed", "network", util.GetShortID(dh.network))
 		}
 		dh.network = ""
 	}
@@ -515,12 +515,12 @@ func (dh *dockerHandler) removeImage() error {
 
 	if err != nil {
 		if isNotFoundError(err) {
-			dh.logger.Info("image already removed", zap.String("name", dh.name))
+			dh.logger.Info("image already removed", "name", dh.name)
 		} else {
 			return fmt.Errorf("image remove: %w", err)
 		}
 	} else {
-		dh.logger.Info("image removed", zap.String("name", dh.name))
+		dh.logger.Info("image removed", "name", dh.name)
 	}
 
 	return nil
@@ -547,7 +547,7 @@ func (dh *dockerHandler) removeRuntime() error {
 func (dh *dockerHandler) Destroy() error {
 	dh.opMux.Lock()
 	defer dh.opMux.Unlock()
-	dh.logger.Info("destroying function", zap.String("name", dh.name))
+	dh.logger.Info("destroying function", "name", dh.name)
 
 	cleanupErrors := make([]error, 0)
 
@@ -644,15 +644,15 @@ func (dh *dockerHandler) Stop() error {
 	defer dh.opMux.Unlock()
 
 	if !dh.isRunning && len(dh.containers) == 0 && dh.network == "" {
-		dh.logger.Info("function is already stopped", zap.String("name", dh.name))
+		dh.logger.Info("function is already stopped", "name", dh.name)
 		return nil
 	}
 
-	dh.logger.Info("scaling function to zero", zap.String("name", dh.name))
+	dh.logger.Info("scaling function to zero", "name", dh.name)
 	if err := dh.removeRuntime(); err != nil {
 		return err
 	}
-	dh.logger.Info("function scaled down", zap.String("name", dh.name))
+	dh.logger.Info("function scaled down", "name", dh.name)
 	return nil
 }
 

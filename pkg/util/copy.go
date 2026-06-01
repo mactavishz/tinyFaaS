@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -47,7 +47,7 @@ func CopyFile(src, dst string) (err error) {
 
 	_, err = os.Stat(dst)
 	if err == nil || !errors.Is(err, fs.ErrNotExist) {
-		log.Printf("Destination file %s already exists, skipping", dst)
+		slog.Debug("destination file already exists, skipping", "path", dst)
 		return
 	}
 

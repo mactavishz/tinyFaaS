@@ -20,7 +20,7 @@ type FunctionResources struct {
 }
 
 type FunctionResourceRequest struct {
-	Limits   *FunctionResources `json:"limits,omitempty"`
+	Limits *FunctionResources `json:"limits,omitempty"`
 }
 
 type ResourceLimits struct {
@@ -73,7 +73,7 @@ func ParseCPUNano(s string) (int64, error) {
 		return 0, fmt.Errorf("cpu is empty")
 	}
 
-	if before, ok :=strings.CutSuffix(s, "m"); ok  {
+	if before, ok := strings.CutSuffix(s, "m"); ok {
 		milliStr := before
 		r, ok := new(big.Rat).SetString(milliStr)
 		if !ok {

@@ -11,7 +11,6 @@ import (
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/gateway"
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
-	"go.uber.org/zap"
 )
 
 const (
@@ -22,7 +21,6 @@ const (
 
 func main() {
 	logger := util.CreateLogger()
-	defer logger.Sync() // flushes buffer, if any
 
 	port := util.GetEnvOrDefault("GATEWAY_PORT", DEFAULT_PROT)
 	ip := util.GetEnvOrDefault("GATEWAY_IP", DEFAULT_IP)
@@ -39,7 +37,7 @@ func main() {
 
 	// Get mode from environment variable
 	env := util.GetEnvOrDefault("ENV", DEFAULT_MODE)
-	logger.Info("Gateway ENV", zap.String("env", env))
+	logger.Info("Gateway ENV", "env", env)
 	opts = append(opts, gateway.WithMode(env))
 
 	g := gateway.New(logger, opts...)
@@ -61,12 +59,13 @@ func main() {
 	// Start server in goroutine
 	go func() {
 		logger.Info("tinyFaaS Gateway starting",
-			zap.String("address", addr),
-			zap.String("rproxyPort", g.GetRProxyPort()),
-			zap.String("managerPort", g.GetManagerPort()))
+			"address", addr,
+			"rproxyPort", g.GetRProxyPort(),
+			"managerPort", g.GetManagerPort())
 
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatal("gateway failed to start", zap.Error(err))
+			logger.Error("gateway failed to start", "err", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -80,7 +79,7 @@ func main() {
 
 	// Gracefully shutdown server
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("server shutdown error", zap.Error(err))
+		logger.Error("server shutdown error", "err", err)
 	}
 
 	logger.Info("shutdown complete, exiting")

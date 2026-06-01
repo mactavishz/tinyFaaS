@@ -15,7 +15,7 @@ import (
 	retry "github.com/avast/retry-go/v5"
 	"github.com/google/uuid"
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/callgraph"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 type Route struct {
@@ -31,7 +31,7 @@ type RProxy struct {
 	routingTableMux     sync.RWMutex
 	autoscalerEnabled   bool
 	tracker             callgraph.FullTracker
-	logger              *zap.Logger
+	logger              *slog.Logger
 	// gatewayAddr is the host:port of the gateway used for heartbeat and scale-up requests
 	gatewayAddr  string
 	heatbeatAddr string
@@ -91,7 +91,7 @@ func newHTTPClient() *http.Client {
 	}
 }
 
-func New(logger *zap.Logger, mode string) *RProxy {
+func New(logger *slog.Logger, mode string) *RProxy {
 	return &RProxy{
 		routingTable:        make(map[string]*Route),
 		reverseRoutingTable: make(map[string]string),
@@ -127,9 +127,9 @@ func (r *RProxy) SetGatewayAddr(addr string) {
 	r.scaleUpAddr = fmt.Sprintf("http://%s/system/scale-up", addr)
 	r.requestStartAddr = fmt.Sprintf("http://%s/system/request-start", addr)
 	r.requestFinishAddr = fmt.Sprintf("http://%s/system/request-finish", addr)
-	r.logger.Debug("gateway url set", zap.String("url", r.gatewayAddr))
-	r.logger.Debug("heartbeat url set", zap.String("url", r.heatbeatAddr))
-	r.logger.Debug("scale-up url set", zap.String("url", r.scaleUpAddr))
+	r.logger.Debug("gateway url set", "url", r.gatewayAddr)
+	r.logger.Debug("heartbeat url set", "url", r.heatbeatAddr)
+	r.logger.Debug("scale-up url set", "url", r.scaleUpAddr)
 }
 
 // CallgraphEnabled returns whether callgraph tracking is enabled for a given function,
@@ -156,7 +156,7 @@ func (r *RProxy) Add(name string, ips []string, labels map[string]string) error 
 		return fmt.Errorf("no ips given")
 	}
 
-	r.logger.Debug("adding function route", zap.String("name", name), zap.Strings("ips", ips))
+	r.logger.Debug("adding function route", "name", name, "ips", ips)
 	r.routingTableMux.Lock()
 	defer r.routingTableMux.Unlock()
 
@@ -182,7 +182,7 @@ func (r *RProxy) Del(name string) error {
 		return fmt.Errorf("function not found")
 	}
 
-	r.logger.Debug("deleting function route", zap.String("name", name))
+	r.logger.Debug("deleting function route", "name", name)
 
 	// Clean up reverse routing table first (before deleting from routing table)
 	for _, ip := range route.ips {
@@ -209,7 +209,7 @@ func (r *RProxy) Update(name string) error {
 		return nil
 	}
 
-	r.logger.Debug("deactivating function route", zap.String("name", name))
+	r.logger.Debug("deactivating function route", "name", name)
 	for _, ip := range route.ips {
 		delete(r.reverseRoutingTable, ip)
 	}
@@ -271,7 +271,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 
 	callID := header.Get("X-Call-Id")
 	if callID == "" {
-		r.logger.Warn("missing X-Call-Id header", zap.String("function", name))
+		r.logger.Warn("missing X-Call-Id header", "function", name)
 		// Generate fallback callID
 		callID = fmt.Sprintf("unknown-%s", uuid.New().String())
 	}
@@ -288,9 +288,9 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 		if callerFunc, ok := r.GetFunctionNameByIP(sourceIP); ok {
 			caller = callerFunc
 			r.logger.Debug("detected internal call",
-				zap.String("caller", caller),
-				zap.String("callee", name),
-				zap.String("callID", callID))
+				"caller", caller,
+				"callee", name,
+				"callID", callID)
 		}
 	}
 
@@ -298,26 +298,26 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	callerRoute, callerRouteOK := r.getRouteSnapshot(caller)
 
 	if !ok {
-		r.logger.Error("function not found", zap.String("name", name))
+		r.logger.Error("function not found", "name", name)
 		return http.StatusNotFound, nil
 	}
 
-	r.logger.Debug("found function route", zap.Strings("ips", calleeRoute.ips), zap.Bool("active", calleeRoute.isActive))
+	r.logger.Debug("found function route", "ips", calleeRoute.ips, "active", calleeRoute.isActive)
 
 	// Check if function is scaled down and trigger cold start if needed
 	if r.autoscalerEnabled && !calleeRoute.isActive {
-		r.logger.Info("function is scaled down, triggering cold start", zap.String("name", name))
+		r.logger.Info("function is scaled down, triggering cold start", "name", name)
 		// cold=true since this is triggered by a user request
 		// Manager will measure and record the cold start time
 		err := r.scaleUpFunction(name, true)
 		if err != nil {
-			r.logger.Error("failed to trigger cold start", zap.String("name", name), zap.Error(err))
+			r.logger.Error("failed to trigger cold start", "name", name, "err", err)
 			return http.StatusServiceUnavailable, nil
 		}
 
 		updatedRoute, exists := r.waitForRouteReady(name, scaleUpRouteReadyTimeout)
 		if !exists {
-			r.logger.Error("function route disappeared after scale-up", zap.String("name", name))
+			r.logger.Error("function route disappeared after scale-up", "name", name)
 			return http.StatusServiceUnavailable, nil
 		}
 		calleeRoute = updatedRoute
@@ -325,9 +325,9 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 
 	if !calleeRoute.isActive || len(calleeRoute.ips) == 0 {
 		r.logger.Warn("function route not ready for invocation",
-			zap.String("name", name),
-			zap.Bool("active", calleeRoute.isActive),
-			zap.Int("ipCount", len(calleeRoute.ips)))
+			"name", name,
+			"active", calleeRoute.isActive,
+			"ipCount", len(calleeRoute.ips))
 		return http.StatusServiceUnavailable, nil
 	}
 
@@ -345,7 +345,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	r.queueHeartbeat(name)
 	if r.autoscalerEnabled {
 		if err := r.notifyRequestStart(name); err != nil {
-			r.logger.Error("failed to mark request start", zap.String("name", name), zap.Error(err))
+			r.logger.Error("failed to mark request start", "name", name, "err", err)
 			return http.StatusServiceUnavailable, nil
 		}
 	}
@@ -354,11 +354,11 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	ip, err := calleeRoute.PickIP()
 
 	if err != nil {
-		r.logger.Error("failed to pick function ip", zap.Error(err))
+		r.logger.Error("failed to pick function ip", "err", err)
 		return http.StatusInternalServerError, nil
 	}
 
-	r.logger.Debug("chosen function ip", zap.String("ip", ip))
+	r.logger.Debug("chosen function ip", "ip", ip)
 
 	// Trigger prewarming for downstream functions (fire-and-forget, non-blocking)
 	// Prewarming requires both callgraph and autoscaler to be enabled
@@ -376,7 +376,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 
 	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8000/fn", ip), bytes.NewBuffer(payload))
 	if err != nil {
-		r.logger.Error("failed to create request", zap.Error(err))
+		r.logger.Error("failed to create request", "err", err)
 		return http.StatusInternalServerError, nil
 	}
 
@@ -388,7 +388,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 			if r.autoscalerEnabled {
 				defer func() {
 					if finishErr := r.notifyRequestFinish(name); finishErr != nil {
-						r.logger.Warn("failed to mark request finish", zap.String("name", name), zap.Error(finishErr))
+						r.logger.Warn("failed to mark request finish", "name", name, "err", finishErr)
 					}
 				}()
 			}
@@ -409,14 +409,14 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	if r.autoscalerEnabled {
 		defer func() {
 			if err := r.notifyRequestFinish(name); err != nil {
-				r.logger.Warn("failed to mark request finish", zap.String("name", name), zap.Error(err))
+				r.logger.Warn("failed to mark request finish", "name", name, "err", err)
 			}
 		}()
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		r.logger.Error("failed to invoke function", zap.Error(err))
+		r.logger.Error("failed to invoke function", "err", err)
 		return http.StatusInternalServerError, nil
 	}
 
@@ -424,7 +424,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	res_body, err := io.ReadAll(resp.Body)
 
 	if err != nil {
-		r.logger.Error("failed to read response body", zap.Error(err))
+		r.logger.Error("failed to read response body", "err", err)
 		return http.StatusInternalServerError, nil
 	}
 
@@ -457,8 +457,8 @@ func (r *RProxy) prewarmDownstream(functionName string) {
 	}
 
 	r.logger.Debug("prewarming downstream functions",
-		zap.String("caller", functionName),
-		zap.Int("targetCount", len(targets)))
+		"caller", functionName,
+		"targetCount", len(targets))
 
 	for _, target := range targets {
 		r.schedulePrewarm(functionName, target)
@@ -482,7 +482,7 @@ func (r *RProxy) schedulePrewarm(caller string, target callgraph.PrewarmTarget) 
 
 	if !isScaledDown {
 		r.logger.Debug("skipping prewarming - function already active",
-			zap.String("function", target.FunctionName))
+			"function", target.FunctionName)
 		return
 	}
 
@@ -501,21 +501,21 @@ func (r *RProxy) schedulePrewarm(caller string, target callgraph.PrewarmTarget) 
 	// If delay is negative or zero, prewarm immediately
 	if delay <= 0 {
 		r.logger.Info("prewarming function immediately",
-			zap.String("caller", caller),
-			zap.String("target", target.FunctionName),
-			zap.Duration("leadTime", target.LeadTime),
-			zap.Duration("coldStartTime", coldStartTime))
+			"caller", caller,
+			"target", target.FunctionName,
+			"leadTime", target.LeadTime,
+			"coldStartTime", coldStartTime)
 
 		go r.executePrewarm(target.FunctionName)
 		return
 	}
 
 	r.logger.Info("scheduling prewarm",
-		zap.String("caller", caller),
-		zap.String("target", target.FunctionName),
-		zap.Duration("leadTime", target.LeadTime),
-		zap.Duration("coldStartTime", coldStartTime),
-		zap.Duration("delay", delay))
+		"caller", caller,
+		"target", target.FunctionName,
+		"leadTime", target.LeadTime,
+		"coldStartTime", coldStartTime,
+		"delay", delay)
 
 	// Schedule the prewarm after the calculated delay
 	time.AfterFunc(delay, func() {
@@ -527,7 +527,7 @@ func (r *RProxy) schedulePrewarm(caller string, target callgraph.PrewarmTarget) 
 
 		if !stillScaledDown {
 			r.logger.Debug("skipping scheduled prewarm - function became active",
-				zap.String("function", target.FunctionName))
+				"function", target.FunctionName)
 			return
 		}
 
@@ -539,11 +539,11 @@ func (r *RProxy) schedulePrewarm(caller string, target callgraph.PrewarmTarget) 
 func (r *RProxy) executePrewarm(funcName string) {
 	if err := r.scaleUpFunction(funcName, false); err != nil {
 		r.logger.Debug("prewarm downstream function failed",
-			zap.String("function", funcName),
-			zap.Error(err))
+			"function", funcName,
+			"err", err)
 	} else {
 		r.logger.Info("prewarm downstream function completed",
-			zap.String("function", funcName))
+			"function", funcName)
 	}
 }
 
@@ -609,7 +609,7 @@ func (r *RProxy) flushHeartbeats() {
 
 	// Send batch heartbeat
 	if err := r.sendBatchHeartbeat(functions); err != nil {
-		r.logger.Debug("failed to send batch heartbeat", zap.Strings("functions", functions), zap.Error(err))
+		r.logger.Debug("failed to send batch heartbeat", "functions", functions, "err", err)
 		// Re-queue failed functions for next cycle
 		r.heartbeatMux.Lock()
 		for _, name := range functions {
@@ -636,7 +636,7 @@ func (r *RProxy) sendBatchHeartbeat(functions []string) error {
 		retry.Attempts(3),
 		retry.Delay(100*time.Millisecond),
 		retry.OnRetry(func(attempt uint, err error) {
-			r.logger.Debug("batch heartbeat attempt failed", zap.Uint("attempt", attempt), zap.Strings("functions", functions), zap.Error(err))
+			r.logger.Debug("batch heartbeat attempt failed", "attempt", attempt, "functions", functions, "err", err)
 		}),
 	).Do(
 		func() error {
@@ -656,7 +656,7 @@ func (r *RProxy) sendBatchHeartbeat(functions []string) error {
 				return fmt.Errorf("batch heartbeat returned status %d", resp.StatusCode)
 			}
 
-			r.logger.Debug("successfully sent batch heartbeat", zap.Int("count", len(functions)))
+			r.logger.Debug("successfully sent batch heartbeat", "count", len(functions))
 			return nil
 		},
 	)
@@ -685,7 +685,7 @@ func (r *RProxy) scaleUpFunction(name string, cold bool) error {
 		retry.Attempts(5),
 		retry.Delay(100*time.Millisecond),
 		retry.OnRetry(func(attempt uint, err error) {
-			r.logger.Debug("scale-up attempt failed", zap.Uint("attempt", attempt), zap.String("name", name), zap.Bool("cold", cold), zap.Error(err))
+			r.logger.Debug("scale-up attempt failed", "attempt", attempt, "name", name, "cold", cold, "err", err)
 		}),
 	).Do(
 		func() error {
@@ -705,12 +705,12 @@ func (r *RProxy) scaleUpFunction(name string, cold bool) error {
 				return fmt.Errorf("scale-up returned status %d", resp.StatusCode)
 			}
 
-			r.logger.Info("successfully scaled up the function", zap.String("name", name), zap.Bool("cold", cold))
+			r.logger.Info("successfully scaled up the function", "name", name, "cold", cold)
 			return nil
 		},
 	)
 	if err != nil {
-		r.logger.Error("failed to scale up the function", zap.String("name", name), zap.Bool("cold", cold), zap.Error(err))
+		r.logger.Error("failed to scale up the function", "name", name, "cold", cold, "err", err)
 		return err
 	}
 

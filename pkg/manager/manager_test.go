@@ -18,8 +18,12 @@ import (
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
+	"log/slog"
 )
+
+func nopLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 type testBackend struct {
 	mu              sync.Mutex
@@ -146,7 +150,7 @@ func newManagerWithRProxy(t *testing.T, backend Backend) (*ManagementService, *r
 	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
 	require.NoError(t, err)
 
-	ms := New("test", port, backend, zap.NewNop())
+	ms := New("test", port, backend, nopLogger())
 	return ms, recorder
 }
 
@@ -205,7 +209,7 @@ func makeZipArchive(t *testing.T) string {
 }
 
 func installAutoScaler(ms *ManagementService) *autoscaler.AutoScaler {
-	as := autoscaler.New(autoscaler.Config{Enabled: true, Platform: "tinyfaas", DefaultIdleDuration: time.Minute}, NewTinyFaaSScaleOp(ms, zap.NewNop()), zap.NewNop())
+	as := autoscaler.New(autoscaler.Config{Enabled: true, Platform: "tinyfaas", DefaultIdleDuration: time.Minute}, NewTinyFaaSScaleOp(ms, nopLogger()), nopLogger())
 	ms.SetAutoScaler(as)
 	return as
 }

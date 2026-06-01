@@ -17,7 +17,7 @@ import (
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 	"github.com/google/uuid"
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 var (
@@ -60,16 +60,16 @@ type uploadMetadata struct {
 
 type server struct {
 	ms     managementService
-	logger *zap.Logger
+	logger *slog.Logger
 }
 
-func parseFunctionEnvs(functionEnvs []string, logger *zap.Logger) map[string]string {
+func parseFunctionEnvs(functionEnvs []string, logger *slog.Logger) map[string]string {
 	envs := make(map[string]string)
 	for _, e := range functionEnvs {
 		k, v, ok := strings.Cut(e, "=")
 
 		if !ok {
-			logger.Warn("invalid env", zap.String("env", e))
+			logger.Warn("invalid env", "env", e)
 			continue
 		}
 
@@ -105,14 +105,13 @@ func (s *server) writeUploadArchive(src io.Reader) (string, int64, error) {
 
 func main() {
 	logger := util.CreateLogger()
-	defer logger.Sync() // flushes buffer, if any
 
 	// setting backend to docker
 	id := uuid.New().String()
 
 	// find backend
 	backend := util.GetEnvOrDefault("BACKEND", "docker")
-	logger.Info("using runtime backend", zap.String("backend", backend))
+	logger.Info("using runtime backend", "backend", backend)
 
 	var tfBackend manager.Backend
 	switch backend {
@@ -120,7 +119,8 @@ func main() {
 		logger.Info("using docker backend")
 		tfBackend = docker.New(id, logger)
 	default:
-		logger.Fatal("invalid backend", zap.String("backend", backend))
+		logger.Error("invalid backend", "backend", backend)
+		os.Exit(1)
 	}
 
 	ms := manager.New(
@@ -130,12 +130,13 @@ func main() {
 		logger,
 	)
 
-	logger.Info("manager expects rproxy", zap.String("port", RProxyPort))
+	logger.Info("manager expects rproxy", "port", RProxyPort)
 
 	// Initialize autoscaler
 	autoscalerConfig, err := autoscaler.NewConfigFromEnv("tinyfaas")
 	if err != nil {
-		logger.Fatal("failed to initialize autoscaler", zap.Error(err))
+		logger.Error("failed to initialize autoscaler", "err", err)
+		os.Exit(1)
 	}
 	scaleOp := manager.NewTinyFaaSScaleOp(ms, logger)
 	as := autoscaler.New(autoscalerConfig, scaleOp, logger)
@@ -174,9 +175,10 @@ func main() {
 
 	// start HTTP server in goroutine
 	go func() {
-		logger.Info("starting HTTP server", zap.String("address", addr))
+		logger.Info("starting HTTP server", "address", addr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatal("HTTP server error", zap.Error(err))
+			logger.Error("HTTP server error", "err", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -193,7 +195,7 @@ func main() {
 	// gracefully shutdown HTTP server
 	logger.Info("shutting down HTTP server...")
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		logger.Error("HTTP server shutdown error", zap.Error(err))
+		logger.Error("HTTP server shutdown error", "err", err)
 	}
 
 	// stop autoscaler
@@ -203,7 +205,7 @@ func main() {
 	// stop management service (cleans up function containers)
 	logger.Info("stopping management service...")
 	if err := ms.Stop(); err != nil {
-		logger.Error("management service shutdown error", zap.Error(err))
+		logger.Error("management service shutdown error", "err", err)
 	}
 
 	logger.Info("shutdown complete")
@@ -221,7 +223,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, "failed to parse multipart upload request\n")
-		s.logger.Error("failed to parse multipart upload request", zap.Error(err))
+		s.logger.Error("failed to parse multipart upload request", "err", err)
 		return
 	}
 
@@ -234,7 +236,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := os.Remove(archivePath); err != nil && !os.IsNotExist(err) {
-			s.logger.Error("failed to remove uploaded archive", zap.String("path", archivePath), zap.Error(err))
+			s.logger.Error("failed to remove uploaded archive", "path", archivePath, "err", err)
 		}
 	}()
 
@@ -246,7 +248,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprintf(w, "failed to read upload request\n")
-			s.logger.Error("failed to read upload request", zap.Error(err))
+			s.logger.Error("failed to read upload request", "err", err)
 			return
 		}
 
@@ -264,7 +266,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 				part.Close()
 				w.WriteHeader(http.StatusBadRequest)
 				fmt.Fprintf(w, "failed to decode upload metadata\n")
-				s.logger.Error("failed to decode upload metadata", zap.Error(err))
+				s.logger.Error("failed to decode upload metadata", "err", err)
 				return
 			}
 			metadata = &decoded
@@ -281,11 +283,11 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 				part.Close()
 				w.WriteHeader(http.StatusInternalServerError)
 				fmt.Fprintf(w, "failed to persist upload archive\n")
-				s.logger.Error("failed to persist upload archive", zap.Error(err))
+				s.logger.Error("failed to persist upload archive", "err", err)
 				return
 			}
 		default:
-			s.logger.Debug("ignoring unexpected upload part", zap.String("part", part.FormName()))
+			s.logger.Debug("ignoring unexpected upload part", "part", part.FormName())
 			_, _ = io.Copy(io.Discard, part)
 		}
 
@@ -304,7 +306,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("receive upload request", zap.String("name", metadata.FunctionName), zap.String("env", metadata.FunctionEnv), zap.Int("replicas", metadata.FunctionReplicas), zap.Int64("bytes", archiveBytes), zap.Strings("envs", metadata.FunctionEnvs), zap.Any("labels", metadata.FunctionLabels), zap.Any("limits", metadata.Limits))
+	s.logger.Info("receive upload request", "name", metadata.FunctionName, "env", metadata.FunctionEnv, "replicas", metadata.FunctionReplicas, "bytes", archiveBytes, "envs", metadata.FunctionEnvs, "labels", metadata.FunctionLabels, "limits", metadata.Limits)
 	envs := parseFunctionEnvs(metadata.FunctionEnvs, s.logger)
 
 	if metadata.FunctionLabels == nil {
@@ -316,7 +318,7 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "failed to upload function\n")
-		s.logger.Error("failed to upload function", zap.Error(err))
+		s.logger.Error("failed to upload function", "err", err)
 		return
 	}
 
@@ -342,11 +344,11 @@ func (s *server) deleteHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, "failed to decode delete request\n")
-		s.logger.Error("failed to decode delete request", zap.Error(err))
+		s.logger.Error("failed to decode delete request", "err", err)
 		return
 	}
 
-	s.logger.Info("receive delete request", zap.String("name", d.FunctionName))
+	s.logger.Info("receive delete request", "name", d.FunctionName)
 
 	// delete function
 	err = s.ms.Delete(d.FunctionName)
@@ -354,7 +356,7 @@ func (s *server) deleteHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "failed to delete function\n")
-		s.logger.Error("failed to delete function", zap.String("name", d.FunctionName), zap.Error(err))
+		s.logger.Error("failed to delete function", "name", d.FunctionName, "err", err)
 		return
 	}
 
@@ -416,7 +418,7 @@ func (s *server) wipeHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "failed to wipe functions\n")
-		s.logger.Error("failed to wipe functions", zap.Error(err))
+		s.logger.Error("failed to wipe functions", "err", err)
 		return
 	}
 
@@ -434,14 +436,14 @@ func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
 	// parse request
 	var logs io.Reader
 	name := r.URL.Query().Get("name")
-	s.logger.Info("receive logs request", zap.String("function_name", name))
+	s.logger.Info("receive logs request", "function_name", name)
 
 	if name == "" {
 		l, err := s.ms.Logs()
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			fmt.Fprintf(w, "failed to get logs\n")
-			s.logger.Error("failed to get logs", zap.Error(err))
+			s.logger.Error("failed to get logs", "err", err)
 			return
 		}
 		logs = l
@@ -453,7 +455,7 @@ func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			fmt.Fprintf(w, "failed to get logs for function %s\n", name)
-			s.logger.Error("failed to get logs for function", zap.String("name", name), zap.Error(err))
+			s.logger.Error("failed to get logs for function", "name", name, "err", err)
 			return
 		}
 		logs = l
@@ -466,7 +468,7 @@ func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "failed to write logs to response\n")
-		s.logger.Error("failed to write logs to response", zap.Error(err))
+		s.logger.Error("failed to write logs to response", "err", err)
 		return
 	}
 }
@@ -494,11 +496,11 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, "failed to decode url upload request\n")
-		s.logger.Error("failed to decode url upload request", zap.Error(err))
+		s.logger.Error("failed to decode url upload request", "err", err)
 		return
 	}
 
-	s.logger.Info("receive url upload request", zap.String("name", d.FunctionName), zap.String("env", d.FunctionEnv), zap.Int("replicas", d.FunctionReplicas), zap.String("url", d.FunctionURL), zap.Strings("envs", d.FunctionEnvs), zap.String("subfolder", d.SubFolder), zap.Any("labels", d.FunctionLabels), zap.Any("limits", d.Limits))
+	s.logger.Info("receive url upload request", "name", d.FunctionName, "env", d.FunctionEnv, "replicas", d.FunctionReplicas, "url", d.FunctionURL, "envs", d.FunctionEnvs, "subfolder", d.SubFolder, "labels", d.FunctionLabels, "limits", d.Limits)
 
 	envs := parseFunctionEnvs(d.FunctionEnvs, s.logger)
 
@@ -511,7 +513,7 @@ func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "failed to upload function from url\n")
-		s.logger.Error("failed to upload function from url", zap.Error(err))
+		s.logger.Error("failed to upload function from url", "err", err)
 		return
 	}
 
@@ -537,25 +539,25 @@ func (s *server) scaleUpHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, "failed to decode scale up request\n")
-		s.logger.Error("failed to decode scale up request", zap.Error(err))
+		s.logger.Error("failed to decode scale up request", "err", err)
 		return
 	}
 
-	s.logger.Info("receive scale up request", zap.String("name", d.FunctionName), zap.Bool("cold", d.Cold))
+	s.logger.Info("receive scale up request", "name", d.FunctionName, "cold", d.Cold)
 	// scale up function
 	err = s.ms.ScaleUp(d.FunctionName, d.Cold)
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "failed to scale up function\n")
-		s.logger.Error("failed to scale up function", zap.String("name", d.FunctionName), zap.Error(err))
+		s.logger.Error("failed to scale up function", "name", d.FunctionName, "err", err)
 		return
 	}
 
 	// return success
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "Function %s scaled up\n", d.FunctionName)
-	s.logger.Info("function scaled up successfully", zap.String("name", d.FunctionName))
+	s.logger.Info("function scaled up successfully", "name", d.FunctionName)
 }
 
 func (s *server) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
@@ -575,25 +577,25 @@ func (s *server) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, "failed to decode heartbeat request\n")
-		s.logger.Error("failed to decode heartbeat request", zap.Error(err))
+		s.logger.Error("failed to decode heartbeat request", "err", err)
 		return
 	}
 
 	// Handle batch heartbeat
 	if len(d.Functions) > 0 {
-		s.logger.Debug("receive batch heartbeat request", zap.Int("count", len(d.Functions)))
+		s.logger.Debug("receive batch heartbeat request", "count", len(d.Functions))
 
 		err = s.ms.HeartbeatBatch(d.Functions)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			fmt.Fprintf(w, "failed to record batch heartbeat\n")
-			s.logger.Error("failed to record batch heartbeat", zap.Strings("functions", d.Functions), zap.Error(err))
+			s.logger.Error("failed to record batch heartbeat", "functions", d.Functions, "err", err)
 			return
 		}
 
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "Batch heartbeat for %d functions recorded\n", len(d.Functions))
-		s.logger.Debug("batch heartbeat recorded successfully", zap.Int("count", len(d.Functions)))
+		s.logger.Debug("batch heartbeat recorded successfully", "count", len(d.Functions))
 		return
 	}
 
@@ -604,19 +606,19 @@ func (s *server) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Debug("receive heartbeat request", zap.String("name", d.FunctionName))
+	s.logger.Debug("receive heartbeat request", "name", d.FunctionName)
 
 	err = s.ms.Heartbeat(d.FunctionName)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "failed to record heartbeat\n")
-		s.logger.Error("failed to record heartbeat", zap.String("name", d.FunctionName), zap.Error(err))
+		s.logger.Error("failed to record heartbeat", "name", d.FunctionName, "err", err)
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "Heartbeat for function %s recorded\n", d.FunctionName)
-	s.logger.Debug("heartbeat recorded successfully", zap.String("name", d.FunctionName))
+	s.logger.Debug("heartbeat recorded successfully", "name", d.FunctionName)
 }
 
 func (s *server) startRequestHandler(w http.ResponseWriter, r *http.Request) {
@@ -633,7 +635,7 @@ func (s *server) startRequestHandler(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, "failed to decode request start request\n")
-		s.logger.Error("failed to decode request start request", zap.Error(err))
+		s.logger.Error("failed to decode request start request", "err", err)
 		return
 	}
 
@@ -646,7 +648,7 @@ func (s *server) startRequestHandler(w http.ResponseWriter, r *http.Request) {
 	if err := s.ms.StartRequest(d.FunctionName); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "failed to mark request start\n")
-		s.logger.Error("failed to mark request start", zap.String("name", d.FunctionName), zap.Error(err))
+		s.logger.Error("failed to mark request start", "name", d.FunctionName, "err", err)
 		return
 	}
 
@@ -668,7 +670,7 @@ func (s *server) endRequestHandler(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, "failed to decode request finish request\n")
-		s.logger.Error("failed to decode request finish request", zap.Error(err))
+		s.logger.Error("failed to decode request finish request", "err", err)
 		return
 	}
 

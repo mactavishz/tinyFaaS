@@ -2,13 +2,17 @@ package gateway
 
 import (
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"go.uber.org/zap"
 )
+
+func nopLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 func TestStatsStoreRecordAndReset(t *testing.T) {
 	store := NewFunctionStatsStore()
@@ -32,7 +36,7 @@ func TestStatsStoreRecordAndReset(t *testing.T) {
 }
 
 func TestRecordInvocationStatsMiddleware(t *testing.T) {
-	g := New(zap.NewNop())
+	g := New(nopLogger())
 	req := httptest.NewRequest(http.MethodPost, "/fn/echo", nil)
 	rec := httptest.NewRecorder()
 
@@ -72,7 +76,7 @@ func TestHandleFunctionStats(t *testing.T) {
 		t.Fatalf("split host port failed: %v", err)
 	}
 
-	g := New(zap.NewNop(), WithManagerPort(port))
+	g := New(nopLogger(), WithManagerPort(port))
 	g.stats.Record("echo", InvocationRecord{StatusCode: 200, Success: true, Method: http.MethodPost, Path: "/fn/echo"})
 
 	req := httptest.NewRequest(http.MethodGet, "/system/stats/function/echo", nil)

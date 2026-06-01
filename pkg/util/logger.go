@@ -1,17 +1,21 @@
 package util
 
 import (
+	"log/slog"
+	"os"
 	"strings"
-
-	"go.uber.org/zap"
 )
 
-func CreateLogger() *zap.Logger {
-	var logger *zap.Logger
-	if strings.ToLower(GetEnvOrDefault("ENV", "development")) == "development" {
-		logger = zap.Must(zap.NewDevelopment())
-	} else {
-		logger = zap.Must(zap.NewProduction())
+func CreateLogger() *slog.Logger {
+	level := slog.LevelInfo
+	switch strings.ToLower(GetEnvOrDefault("LOG_LEVEL", "info")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
 	}
-	return logger
+
+	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 }

@@ -3,6 +3,8 @@ package rproxy
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,8 +15,11 @@ import (
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/callgraph"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 )
+
+func nopLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 func startFunctionRuntimeServer(t *testing.T) func() {
 	t.Helper()
@@ -48,7 +53,7 @@ func startFunctionRuntimeServer(t *testing.T) func() {
 
 func TestScaleUpFunctionReturnsError(t *testing.T) {
 	t.Run("connection refused", func(t *testing.T) {
-		r := New(zap.NewNop(), "development")
+		r := New(nopLogger(), "development")
 		r.SetGatewayAddr("127.0.0.1:1")
 
 		err := r.scaleUpFunction("test-func", true)
@@ -62,7 +67,7 @@ func TestScaleUpFunctionReturnsError(t *testing.T) {
 		}))
 		defer server.Close()
 
-		r := New(zap.NewNop(), "development")
+		r := New(nopLogger(), "development")
 		r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
 
 		err := r.scaleUpFunction("test-func", true)
@@ -72,11 +77,11 @@ func TestScaleUpFunctionReturnsError(t *testing.T) {
 }
 
 func TestCallReturns503WhenColdStartTriggerFails(t *testing.T) {
-	tracker := callgraph.New(callgraph.WithLogger(zap.NewNop()))
+	tracker := callgraph.New(callgraph.WithLogger(nopLogger()))
 	tracker.Start()
 	defer tracker.Stop()
 
-	r := New(zap.NewNop(), "development")
+	r := New(nopLogger(), "development")
 	r.SetTracker(tracker)
 	r.SetAutoScalerEnabled(true)
 	r.SetGatewayAddr("127.0.0.1:1")
@@ -99,7 +104,7 @@ func TestCallWaitsForRouteReadyAfterScaleUp(t *testing.T) {
 	stopRuntime := startFunctionRuntimeServer(t)
 	defer stopRuntime()
 
-	r := New(zap.NewNop(), "development")
+	r := New(nopLogger(), "development")
 	r.SetAutoScalerEnabled(true)
 
 	r.routingTableMux.Lock()
@@ -142,11 +147,11 @@ func TestCallRecordsEdgeWhenRouteReady(t *testing.T) {
 	stopRuntime := startFunctionRuntimeServer(t)
 	defer stopRuntime()
 
-	tracker := callgraph.New(callgraph.WithLogger(zap.NewNop()))
+	tracker := callgraph.New(callgraph.WithLogger(nopLogger()))
 	tracker.Start()
 	defer tracker.Stop()
 
-	r := New(zap.NewNop(), "development")
+	r := New(nopLogger(), "development")
 	r.SetTracker(tracker)
 
 	r.routingTableMux.Lock()
@@ -167,7 +172,7 @@ func TestCallRecordsEdgeWhenRouteReady(t *testing.T) {
 }
 
 func TestUpdateDeactivatesRouteIdempotently(t *testing.T) {
-	r := New(zap.NewNop(), "development")
+	r := New(nopLogger(), "development")
 
 	err := r.Add("test-func", []string{"10.0.0.2", "10.0.0.3"}, map[string]string{})
 	require.NoError(t, err)
@@ -211,7 +216,7 @@ func TestSendBatchHeartbeatUsesConfiguredGatewayAddr(t *testing.T) {
 	}))
 	defer server.Close()
 
-	r := New(zap.NewNop(), "development")
+	r := New(nopLogger(), "development")
 	r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
 
 	err := r.sendBatchHeartbeat([]string{"test-func"})

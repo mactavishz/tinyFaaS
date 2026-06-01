@@ -15,7 +15,6 @@ import (
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/callgraph"
-	"go.uber.org/zap"
 )
 
 var emptyBody = []byte{}
@@ -27,13 +26,12 @@ const (
 
 func main() {
 	logger := util.CreateLogger()
-	defer logger.Sync() // flushes buffer, if any
 
 	listenAddr := fmt.Sprintf("%s:%s", "127.0.0.1", util.GetEnvOrDefault("RPROXY_PORT", DEFAULT_PORT))
 
 	// Get mode from environment variable
 	mode := util.GetEnvOrDefault("ENV", DEFAULT_MODE)
-	logger.Info("RProxy ENV", zap.String("env", mode))
+	logger.Info("RProxy ENV", "env", mode)
 	r := rproxy.New(logger, mode)
 
 	// Configure gateway address for heartbeat and scale-up requests
@@ -41,12 +39,13 @@ func main() {
 	gatewayPort := util.GetEnvOrDefault("GATEWAY_PORT", "80")
 	gatewayAddr := fmt.Sprintf("%s:%s", gatewayIP, gatewayPort)
 	r.SetGatewayAddr(gatewayAddr)
-	logger.Info("gateway url configured", zap.String("url", gatewayAddr))
+	logger.Info("gateway url configured", "url", gatewayAddr)
 
 	// Initialize autoscaler for activity tracking
 	autoscalerConfig, err := autoscaler.NewConfigFromEnv("tinyfaas")
 	if err != nil {
-		logger.Fatal("failed to initialize autoscaler", zap.Error(err))
+		logger.Error("failed to initialize autoscaler", "err", err)
+		os.Exit(1)
 	}
 	if autoscalerConfig.Enabled {
 		r.SetAutoScalerEnabled(true)
@@ -58,7 +57,8 @@ func main() {
 	// Initialize callgraph (includes prewarming)
 	callGraphConfig, err := callgraph.NewConfigFromEnv("tinyfaas")
 	if err != nil {
-		logger.Fatal("failed to initialize callgraph config", zap.Error(err))
+		logger.Error("failed to initialize callgraph config", "err", err)
+		os.Exit(1)
 	}
 
 	tracker := callgraph.New(
@@ -86,13 +86,13 @@ func main() {
 		switch callGraphConfig.Method {
 		case callgraph.ExponentialMovingAverage:
 			logger.Info("callgraph config",
-				zap.String("method", callGraphConfig.Method.String()),
-				zap.Float64("alpha", callGraphConfig.EMAConfig.Alpha),
+				"method", callGraphConfig.Method.String(),
+				"alpha", callGraphConfig.EMAConfig.Alpha,
 			)
 		default:
 			logger.Info("callgraph config",
-				zap.String("method", callGraphConfig.Method.String()),
-				zap.Int("window_size", callGraphConfig.SMAConfig.WindowSize),
+				"method", callGraphConfig.Method.String(),
+				"window_size", callGraphConfig.SMAConfig.WindowSize,
 			)
 		}
 	} else {
@@ -115,11 +115,11 @@ func main() {
 			err := json.NewDecoder(req.Body).Decode(&def)
 			if err != nil {
 				w.WriteHeader(http.StatusBadRequest)
-				logger.Error("failed to decode request", zap.Error(err))
+				logger.Error("failed to decode request", "err", err)
 				return
 			}
 
-			logger.Info("registering function", zap.String("name", def.FunctionResource), zap.Strings("ips", def.FunctionContainers))
+			logger.Info("registering function", "name", def.FunctionResource, "ips", def.FunctionContainers)
 			if def.FunctionResource != "" && def.FunctionResource[0] == '/' {
 				def.FunctionResource = def.FunctionResource[1:]
 			}
@@ -137,7 +137,7 @@ func main() {
 			err = r.Add(def.FunctionResource, def.FunctionContainers, def.FunctionLabels)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				logger.Error("failed to add function", zap.Error(err))
+				logger.Error("failed to add function", "err", err)
 				return
 			}
 
@@ -153,11 +153,11 @@ func main() {
 			err := json.NewDecoder(req.Body).Decode(&def)
 			if err != nil {
 				w.WriteHeader(http.StatusBadRequest)
-				logger.Error("failed to decode request", zap.Error(err))
+				logger.Error("failed to decode request", "err", err)
 				return
 			}
 
-			logger.Info("deleting function", zap.String("name", def.FunctionResource))
+			logger.Info("deleting function", "name", def.FunctionResource)
 			if def.FunctionResource != "" && def.FunctionResource[0] == '/' {
 				def.FunctionResource = def.FunctionResource[1:]
 			}
@@ -165,7 +165,7 @@ func main() {
 			err = r.Del(def.FunctionResource)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				logger.Error("failed to delete function", zap.Error(err))
+				logger.Error("failed to delete function", "err", err)
 				return
 			}
 
@@ -181,11 +181,11 @@ func main() {
 			err := json.NewDecoder(req.Body).Decode(&def)
 			if err != nil {
 				w.WriteHeader(http.StatusBadRequest)
-				logger.Error("failed to decode request", zap.Error(err))
+				logger.Error("failed to decode request", "err", err)
 				return
 			}
 
-			logger.Info("clearing function ips", zap.String("name", def.FunctionResource))
+			logger.Info("clearing function ips", "name", def.FunctionResource)
 
 			if def.FunctionResource != "" && def.FunctionResource[0] == '/' {
 				def.FunctionResource = def.FunctionResource[1:]
@@ -194,7 +194,7 @@ func main() {
 			err = r.Update(def.FunctionResource)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				logger.Error("failed to delete function", zap.Error(err))
+				logger.Error("failed to delete function", "err", err)
 				return
 			}
 
@@ -228,8 +228,8 @@ func main() {
 			sourceIP = util.ExtractIP(req.RemoteAddr)
 		}
 
-		logger.Debug("incoming request", zap.String("ip", sourceIP))
-		logger.Info("invoking function", zap.String("name", functionName), zap.Bool("async", async))
+		logger.Debug("incoming request", "ip", sourceIP)
+		logger.Info("invoking function", "name", functionName, "async", async)
 
 		// Check if the caller is another function on the platform
 		callerFunctionName := ""
@@ -239,16 +239,16 @@ func main() {
 			if callerName, ok := r.GetFunctionNameByIP(sourceIP); ok {
 				callerFunctionName = callerName
 				logger.Info("Intra-platform invocation",
-					zap.String("caller", callerFunctionName),
-					zap.String("callee", functionName),
-					zap.String("sourceIP", sourceIP))
+					"caller", callerFunctionName,
+					"callee", functionName,
+					"sourceIP", sourceIP)
 			}
 		}
 
 		req_body, err := io.ReadAll(req.Body)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			logger.Error("failed to read request body", zap.Error(err))
+			logger.Error("failed to read request body", "err", err)
 			return
 		}
 
@@ -280,7 +280,7 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(callGraph); err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				logger.Error("failed to encode call graph", zap.Error(err))
+				logger.Error("failed to encode call graph", "err", err)
 				return
 			}
 		})
@@ -301,7 +301,7 @@ func main() {
 				w.Header().Set("Content-Type", "application/json")
 				if err := json.NewEncoder(w).Encode(stats); err != nil {
 					w.WriteHeader(http.StatusInternalServerError)
-					logger.Error("failed to encode function stats", zap.Error(err))
+					logger.Error("failed to encode function stats", "err", err)
 					return
 				}
 				return
@@ -316,7 +316,7 @@ func main() {
 				w.Header().Set("Content-Type", "application/json")
 				if err := json.NewEncoder(w).Encode(stats); err != nil {
 					w.WriteHeader(http.StatusInternalServerError)
-					logger.Error("failed to encode function stats", zap.Error(err))
+					logger.Error("failed to encode function stats", "err", err)
 					return
 				}
 			}
@@ -349,7 +349,7 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(edge); err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				logger.Error("failed to encode edge stats", zap.Error(err))
+				logger.Error("failed to encode edge stats", "err", err)
 				return
 			}
 		})
@@ -371,7 +371,7 @@ func main() {
 
 		if err := json.NewDecoder(req.Body).Decode(&data); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			logger.Error("failed to decode scale-up request", zap.Error(err))
+			logger.Error("failed to decode scale-up request", "err", err)
 			return
 		}
 
@@ -395,10 +395,10 @@ func main() {
 		}
 
 		logger.Info("recorded scale-up from manager",
-			zap.String("function", data.FunctionName),
-			zap.Time("timestamp", timestamp),
-			zap.Duration("duration", duration),
-			zap.Bool("cold", data.Cold))
+			"function", data.FunctionName,
+			"timestamp", timestamp,
+			"duration", duration,
+			"cold", data.Cold)
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
@@ -419,7 +419,7 @@ func main() {
 
 		if err := json.NewDecoder(req.Body).Decode(&data); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			logger.Error("failed to decode scale-down request", zap.Error(err))
+			logger.Error("failed to decode scale-down request", "err", err)
 			return
 		}
 
@@ -443,9 +443,9 @@ func main() {
 		}
 
 		logger.Info("recorded scale-down from manager",
-			zap.String("function", data.FunctionName),
-			zap.Time("timestamp", timestamp),
-			zap.Duration("duration", duration))
+			"function", data.FunctionName,
+			"timestamp", timestamp,
+			"duration", duration)
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
@@ -464,7 +464,7 @@ func main() {
 
 		if err := json.NewDecoder(req.Body).Decode(&data); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			logger.Error("failed to decode reset request", zap.Error(err))
+			logger.Error("failed to decode reset request", "err", err)
 			return
 		}
 
@@ -479,7 +479,7 @@ func main() {
 		}
 
 		logger.Info("reset function stats for redeployment",
-			zap.String("function", data.FunctionName))
+			"function", data.FunctionName)
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
@@ -502,9 +502,10 @@ func main() {
 
 	// start server in goroutine
 	go func() {
-		logger.Info("rproxy server started", zap.String("address", listenAddr))
+		logger.Info("rproxy server started", "address", listenAddr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatal("server error", zap.Error(err))
+			logger.Error("server error", "err", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -525,7 +526,7 @@ func main() {
 
 	// gracefully shutdown server
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("server shutdown error", zap.Error(err))
+		logger.Error("server shutdown error", "err", err)
 	}
 
 	logger.Info("shutdown complete, exiting")
