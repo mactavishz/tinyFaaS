@@ -48,12 +48,12 @@ build-rproxy: tf-rproxy-${OS}-${ARCH}
 build-gateway: tf-gateway-${OS}-${ARCH}
 
 .PHONY: unit-test
-unit-test:
+unit-test: pkg/docker/runtimes-$(ARCH)
 	@echo "Running unit tests..."
 	go test -v ./pkg/... --cover
 
 .PHONY: integration-test
-integration-test:
+integration-test: pkg/docker/runtimes-$(ARCH)
 	@echo "Running integration tests..."
 	go test -count=1 -v -timeout 10m ./test/integrations/...
 
