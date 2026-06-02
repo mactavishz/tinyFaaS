@@ -16,13 +16,20 @@ import (
 
 // TinyFaaSScaleOp implements the autoscaler.ScaleOperation interface for tinyFaaS
 type TinyFaaSScaleOp struct {
-	ms     *ManagementService
-	logger *slog.Logger
+	ms         *ManagementService
+	logger     *slog.Logger
+	httpClient *http.Client
 }
 
 // NewTinyFaaSScaleOp creates a new TinyFaaSScaleOp
 func NewTinyFaaSScaleOp(ms *ManagementService, logger *slog.Logger) *TinyFaaSScaleOp {
-	return &TinyFaaSScaleOp{ms: ms, logger: logger}
+	return &TinyFaaSScaleOp{
+		ms:     ms,
+		logger: logger,
+		httpClient: &http.Client{
+			Timeout: 60 * time.Second,
+		},
+	}
 }
 
 // ScaleDown stops the function containers
@@ -35,6 +42,7 @@ func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 		return fmt.Errorf("function %s not found", functionName)
 	}
 
+	ips := handler.IPs()
 	if err := op.notifyRProxyClearIPs(functionName); err != nil {
 		op.logger.Error("failed to notify rproxy about scale down", "function", functionName, "err", err)
 		return fmt.Errorf("failed to notify rproxy about scale down: %w", err)
@@ -45,6 +53,15 @@ func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 
 	// Stop the containers
 	if err := handler.Stop(); err != nil {
+		if restoreErr := op.notifyRProxyAdd(functionName, ips); restoreErr != nil {
+			op.logger.Error("failed to restore rproxy route after scale down failure",
+				"function", functionName,
+				"err", restoreErr)
+			return errors.Join(
+				fmt.Errorf("failed to stop function %s: %w", functionName, err),
+				fmt.Errorf("failed to restore rproxy route: %w", restoreErr),
+			)
+		}
 		return fmt.Errorf("failed to stop function %s: %w", functionName, err)
 	}
 
@@ -105,8 +122,8 @@ func (op *TinyFaaSScaleOp) notifyRProxyAdd(functionName string, ips []string) er
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil && !errors.Is(err, io.EOF) {
+	resp, err := op.httpClient.Do(req)
+	if err != nil && (!errors.Is(err, io.EOF) || resp == nil) {
 		return err
 	}
 	defer resp.Body.Close()
@@ -137,8 +154,8 @@ func (op *TinyFaaSScaleOp) notifyRProxyClearIPs(functionName string) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil && !errors.Is(err, io.EOF) {
+	resp, err := op.httpClient.Do(req)
+	if err != nil && (!errors.Is(err, io.EOF) || resp == nil) {
 		return err
 	}
 	defer resp.Body.Close()

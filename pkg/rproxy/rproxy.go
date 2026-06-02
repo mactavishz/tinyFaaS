@@ -12,10 +12,11 @@ import (
 	"sync"
 	"time"
 
+	"log/slog"
+
 	retry "github.com/avast/retry-go/v5"
 	"github.com/google/uuid"
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/callgraph"
-	"log/slog"
 )
 
 type Route struct {
@@ -343,6 +344,11 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	}
 
 	r.queueHeartbeat(name)
+	finishRequest := func() {
+		if err := r.notifyRequestFinish(name); err != nil {
+			r.logger.Warn("failed to mark request finish", "name", name, "err", err)
+		}
+	}
 	if r.autoscalerEnabled {
 		if err := r.notifyRequestStart(name); err != nil {
 			r.logger.Error("failed to mark request start", "name", name, "err", err)
@@ -355,6 +361,9 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 
 	if err != nil {
 		r.logger.Error("failed to pick function ip", "err", err)
+		if r.autoscalerEnabled {
+			finishRequest()
+		}
 		return http.StatusInternalServerError, nil
 	}
 
@@ -377,6 +386,12 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8000/fn", ip), bytes.NewBuffer(payload))
 	if err != nil {
 		r.logger.Error("failed to create request", "err", err)
+		if startedExecution {
+			r.tracker.EndExecution(name, callID, calleeExecID, time.Now())
+		}
+		if r.autoscalerEnabled {
+			finishRequest()
+		}
 		return http.StatusInternalServerError, nil
 	}
 
@@ -386,11 +401,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	if async {
 		go func() {
 			if r.autoscalerEnabled {
-				defer func() {
-					if finishErr := r.notifyRequestFinish(name); finishErr != nil {
-						r.logger.Warn("failed to mark request finish", "name", name, "err", finishErr)
-					}
-				}()
+				defer finishRequest()
 			}
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
@@ -407,11 +418,7 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 
 	// call function and return results
 	if r.autoscalerEnabled {
-		defer func() {
-			if err := r.notifyRequestFinish(name); err != nil {
-				r.logger.Warn("failed to mark request finish", "name", name, "err", err)
-			}
-		}()
+		defer finishRequest()
 	}
 
 	resp, err := http.DefaultClient.Do(req)

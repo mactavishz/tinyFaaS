@@ -3,6 +3,7 @@ package manager
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -65,6 +66,7 @@ type testHandler struct {
 	startCalls   int
 	stopCalls    int
 	destroyCalls int
+	stopErr      error
 	startCh      chan struct{}
 	stopCh       chan struct{}
 	destroyCh    chan struct{}
@@ -91,13 +93,16 @@ func (h *testHandler) Start() error {
 func (h *testHandler) Stop() error {
 	h.mu.Lock()
 	h.stopCalls++
-	h.running = false
+	err := h.stopErr
+	if err == nil {
+		h.running = false
+	}
 	ch := h.stopCh
 	h.mu.Unlock()
 	if ch != nil {
 		close(ch)
 	}
-	return nil
+	return err
 }
 
 func (h *testHandler) Restart() error {
@@ -302,6 +307,36 @@ func TestScaleDownWaitsForInFlightRequest(t *testing.T) {
 	assert.Equal(t, 1, stopCalls)
 	assert.Equal(t, 1, rproxy.count(http.MethodPatch, "/config"))
 	assert.False(t, handler.IsRunning())
+}
+
+func TestScaleDownFailureRestoresRProxyRoute(t *testing.T) {
+	backend := newTestBackend()
+	ms, rproxy := newManagerWithRProxy(t, backend)
+	as := installAutoScaler(ms)
+
+	handler := &testHandler{
+		name:    "echo",
+		ips:     []string{"10.0.0.1"},
+		running: true,
+		stopErr: errors.New("stop failed"),
+	}
+	ms.functionHandlers["echo"] = handler
+	ms.functionConfigs["echo"] = FunctionConfig{Name: "echo", Running: true}
+	as.RegisterFunction("echo", map[string]string{"com.tinyfaas.scale.zero": "true"})
+
+	err := as.ScaleDownWhenIdle("echo")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to stop function echo")
+
+	state, ok := as.GetState("echo")
+	require.True(t, ok)
+	assert.Equal(t, autoscaler.StateActive, state)
+
+	_, stopCalls, _ := handler.counts()
+	assert.Equal(t, 1, stopCalls)
+	assert.True(t, handler.IsRunning())
+	assert.Equal(t, 1, rproxy.count(http.MethodPatch, "/config"))
+	assert.Equal(t, 1, rproxy.count(http.MethodPut, "/config"))
 }
 
 func TestGetReturnsFunctionConfig(t *testing.T) {

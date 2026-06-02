@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,28 @@ import (
 
 func nopLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+type pathRecorder struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func newPathRecorder() *pathRecorder {
+	return &pathRecorder{counts: make(map[string]int)}
+}
+
+func (r *pathRecorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	r.counts[req.URL.Path]++
+	r.mu.Unlock()
+	w.WriteHeader(http.StatusOK)
+}
+
+func (r *pathRecorder) count(path string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.counts[path]
 }
 
 func startFunctionRuntimeServer(t *testing.T) func() {
@@ -141,6 +164,57 @@ func TestCallWaitsForRouteReadyAfterScaleUp(t *testing.T) {
 	status, body := r.Call("test-func", []byte("{}"), false, http.Header{"X-Call-Id": []string{"req-route-sync"}})
 	assert.Equal(t, http.StatusOK, status)
 	assert.Equal(t, []byte("ok"), body)
+}
+
+func TestCallFinishesRequestAfterLocalRequestBuildFailure(t *testing.T) {
+	recorder := newPathRecorder()
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+
+	r := New(nopLogger(), "development")
+	r.SetAutoScalerEnabled(true)
+	r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
+
+	r.routingTableMux.Lock()
+	r.routingTable["test-func"] = &Route{
+		ips:      []string{"bad host"},
+		isActive: true,
+	}
+	r.routingTableMux.Unlock()
+
+	status, body := r.Call("test-func", []byte("{}"), false, http.Header{"X-Call-Id": []string{"req-build-fail"}})
+	assert.Equal(t, http.StatusInternalServerError, status)
+	assert.Nil(t, body)
+	assert.Equal(t, 1, recorder.count("/system/request-start"))
+	assert.Equal(t, 1, recorder.count("/system/request-finish"))
+}
+
+func TestCallAsyncFinishesRequestAfterBackgroundInvocation(t *testing.T) {
+	stopRuntime := startFunctionRuntimeServer(t)
+	defer stopRuntime()
+
+	recorder := newPathRecorder()
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+
+	r := New(nopLogger(), "development")
+	r.SetAutoScalerEnabled(true)
+	r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
+
+	r.routingTableMux.Lock()
+	r.routingTable["test-func"] = &Route{
+		ips:      []string{"127.0.0.1"},
+		isActive: true,
+	}
+	r.routingTableMux.Unlock()
+
+	status, body := r.Call("test-func", []byte("{}"), true, http.Header{"X-Call-Id": []string{"req-async"}})
+	assert.Equal(t, http.StatusAccepted, status)
+	assert.Nil(t, body)
+	assert.Equal(t, 1, recorder.count("/system/request-start"))
+	require.Eventually(t, func() bool {
+		return recorder.count("/system/request-finish") == 1
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestCallRecordsEdgeWhenRouteReady(t *testing.T) {
