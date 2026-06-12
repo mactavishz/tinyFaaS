@@ -32,10 +32,14 @@ func newPathRecorder() *pathRecorder {
 }
 
 func (r *pathRecorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	r.mu.Lock()
-	r.counts[req.URL.Path]++
-	r.mu.Unlock()
+	r.record(req.URL.Path)
 	w.WriteHeader(http.StatusOK)
+}
+
+func (r *pathRecorder) record(path string) {
+	r.mu.Lock()
+	r.counts[path]++
+	r.mu.Unlock()
 }
 
 func (r *pathRecorder) count(path string) int {
@@ -211,10 +215,104 @@ func TestCallAsyncFinishesRequestAfterBackgroundInvocation(t *testing.T) {
 	status, body := r.Call("test-func", []byte("{}"), true, http.Header{"X-Call-Id": []string{"req-async"}})
 	assert.Equal(t, http.StatusAccepted, status)
 	assert.Nil(t, body)
-	assert.Equal(t, 1, recorder.count("/system/request-start"))
+	require.Eventually(t, func() bool {
+		return recorder.count("/system/request-start") == 1
+	}, time.Second, 10*time.Millisecond)
 	require.Eventually(t, func() bool {
 		return recorder.count("/system/request-finish") == 1
 	}, time.Second, 10*time.Millisecond)
+}
+
+func TestCallAsyncReturnsAcceptedBeforeColdStart(t *testing.T) {
+	stopRuntime := startFunctionRuntimeServer(t)
+	defer stopRuntime()
+
+	r := New(nopLogger(), "development")
+	r.SetAutoScalerEnabled(true)
+
+	recorder := newPathRecorder()
+	scaleUpStarted := make(chan struct{})
+	scaleUpReleased := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		recorder.record(req.URL.Path)
+		if req.URL.Path != "/system/scale-up" && req.URL.Path != "/system/request-start" && req.URL.Path != "/system/request-finish" {
+			t.Fatalf("unexpected path: %s", req.URL.Path)
+		}
+		if req.URL.Path != "/system/scale-up" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		close(scaleUpStarted)
+		time.Sleep(200 * time.Millisecond)
+		routingReady := func() {
+			r.routingTableMux.Lock()
+			defer r.routingTableMux.Unlock()
+			r.routingTable["test-func"] = &Route{
+				ips:      []string{"127.0.0.1"},
+				isActive: true,
+			}
+		}
+		routingReady()
+		close(scaleUpReleased)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
+
+	r.routingTableMux.Lock()
+	r.routingTable["test-func"] = &Route{
+		isActive: false,
+	}
+	r.routingTableMux.Unlock()
+
+	start := time.Now()
+	status, body := r.Call("test-func", []byte("{}"), true, http.Header{"X-Call-Id": []string{"req-async-cold"}})
+	elapsed := time.Since(start)
+
+	assert.Equal(t, http.StatusAccepted, status)
+	assert.Nil(t, body)
+	assert.Less(t, elapsed, 100*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-scaleUpStarted:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		select {
+		case <-scaleUpReleased:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		return recorder.count("/system/request-start") == 1 && recorder.count("/system/request-finish") == 1
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestCallAsyncReturns404ForUnknownFunction(t *testing.T) {
+	recorder := newPathRecorder()
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+
+	r := New(nopLogger(), "development")
+	r.SetAutoScalerEnabled(true)
+	r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
+
+	status, body := r.Call("missing-func", []byte("{}"), true, http.Header{"X-Call-Id": []string{"req-async-missing"}})
+	assert.Equal(t, http.StatusNotFound, status)
+	assert.Nil(t, body)
+
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, 0, recorder.count("/system/scale-up"))
+	assert.Equal(t, 0, recorder.count("/system/request-start"))
+	assert.Equal(t, 0, recorder.count("/system/request-finish"))
 }
 
 func TestCallRecordsEdgeWhenRouteReady(t *testing.T) {

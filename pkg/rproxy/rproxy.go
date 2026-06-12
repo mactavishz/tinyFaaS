@@ -270,6 +270,33 @@ func (r *RProxy) waitForRouteReady(name string, timeout time.Duration) (*Route, 
 func (r *RProxy) Call(name string, payload []byte, async bool, header http.Header) (int, []byte) {
 	startTime := time.Now()
 
+	if async {
+		if _, ok := r.getRouteSnapshot(name); !ok {
+			r.logger.Error("function not found", "name", name)
+			return http.StatusNotFound, nil
+		}
+
+		asyncPayload := append([]byte(nil), payload...)
+		asyncHeader := header.Clone()
+
+		go func() {
+			status, _ := r.invoke(name, asyncPayload, asyncHeader, startTime)
+			if status >= http.StatusBadRequest {
+				r.logger.Warn("async invocation failed", "name", name, "status", status)
+			}
+		}()
+
+		return http.StatusAccepted, nil
+	}
+
+	return r.invoke(name, payload, header, startTime)
+}
+
+func (r *RProxy) invoke(name string, payload []byte, header http.Header, startTime time.Time) (int, []byte) {
+	if header == nil {
+		header = http.Header{}
+	}
+
 	callID := header.Get("X-Call-Id")
 	if callID == "" {
 		r.logger.Warn("missing X-Call-Id header", "function", name)
@@ -396,25 +423,6 @@ func (r *RProxy) Call(name string, payload []byte, async bool, header http.Heade
 	}
 
 	req.Header = header
-
-	// call function asynchronously
-	if async {
-		go func() {
-			if r.autoscalerEnabled {
-				defer finishRequest()
-			}
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				return
-			}
-			resp.Body.Close()
-			// Clean up execution context after async call completes
-			if startedExecution {
-				r.tracker.EndExecution(name, callID, calleeExecID, time.Now())
-			}
-		}()
-		return http.StatusAccepted, nil
-	}
 
 	// call function and return results
 	if r.autoscalerEnabled {
