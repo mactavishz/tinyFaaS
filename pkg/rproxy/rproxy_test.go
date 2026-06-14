@@ -253,7 +253,7 @@ func TestCallFinishesRequestAfterLocalRequestBuildFailure(t *testing.T) {
 	assert.Equal(t, 1, recorder.count("/system/request-finish"))
 }
 
-func TestCallAsyncFinishesRequestAfterBackgroundInvocation(t *testing.T) {
+func TestCallLegacyAsyncFlagInvokesSynchronously(t *testing.T) {
 	stopRuntime := startFunctionRuntimeServer(t)
 	defer stopRuntime()
 
@@ -273,17 +273,13 @@ func TestCallAsyncFinishesRequestAfterBackgroundInvocation(t *testing.T) {
 	r.routingTableMux.Unlock()
 
 	status, body := r.Call("test-func", []byte("{}"), true, http.Header{"X-Call-Id": []string{"req-async"}})
-	assert.Equal(t, http.StatusAccepted, status)
-	assert.Nil(t, body)
-	require.Eventually(t, func() bool {
-		return recorder.count("/system/request-start") == 1
-	}, time.Second, 10*time.Millisecond)
-	require.Eventually(t, func() bool {
-		return recorder.count("/system/request-finish") == 1
-	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, []byte("ok"), body)
+	assert.Equal(t, 1, recorder.count("/system/request-start"))
+	assert.Equal(t, 1, recorder.count("/system/request-finish"))
 }
 
-func TestCallAsyncReturnsAcceptedBeforeColdStart(t *testing.T) {
+func TestCallLegacyAsyncFlagWaitsForColdStart(t *testing.T) {
 	stopRuntime := startFunctionRuntimeServer(t)
 	defer stopRuntime()
 
@@ -331,9 +327,9 @@ func TestCallAsyncReturnsAcceptedBeforeColdStart(t *testing.T) {
 	status, body := r.Call("test-func", []byte("{}"), true, http.Header{"X-Call-Id": []string{"req-async-cold"}})
 	elapsed := time.Since(start)
 
-	assert.Equal(t, http.StatusAccepted, status)
-	assert.Nil(t, body)
-	assert.Less(t, elapsed, 100*time.Millisecond)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, []byte("ok"), body)
+	assert.GreaterOrEqual(t, elapsed, 200*time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		select {

@@ -27,12 +27,8 @@ func main() {
 	// Create gateway instance with options
 	var opts []gateway.Option
 
-	if rproxyPort := os.Getenv("RPROXY_PORT"); rproxyPort != "" {
-		opts = append(opts, gateway.WithRProxyPort(rproxyPort))
-	}
-
-	if managerPort := os.Getenv("MANAGER_PORT"); managerPort != "" {
-		opts = append(opts, gateway.WithManagerPort(managerPort))
+	if tinyFaaSPort := os.Getenv("TINYFAAS_PORT"); tinyFaaSPort != "" {
+		opts = append(opts, gateway.WithTinyFaaSPort(tinyFaaSPort))
 	}
 
 	// Get mode from environment variable

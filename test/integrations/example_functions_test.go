@@ -39,8 +39,7 @@ func TestExampleFunctions(t *testing.T) {
 		fnName := "sieve-of-eratosthenes"
 		deploy(t, fnName)
 
-		headers := map[string]string{"X-Tinyfaas-Async": "true"}
-		status, _ := testutil.InvokeTinyFaaS(t, baseURL, fnName, http.MethodGet, nil, headers)
+		status, _ := testutil.InvokeTinyFaaSAsync(t, baseURL, fnName, http.MethodGet, nil, nil)
 		assert.Equal(t, http.StatusAccepted, status)
 	})
 

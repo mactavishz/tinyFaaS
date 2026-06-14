@@ -22,7 +22,7 @@ help:
 	@echo "tinyFaaS Build System"
 	@echo ""
 	@echo "Main targets:"
-	@echo "  make build                  - Build tf-manager and tf-rproxy binaries"
+	@echo "  make build                  - Build tf-server, tf-queue-worker, and tf-gateway binaries"
 	@echo "  make install                - Build binaries and install systemd services"
 	@echo "  make down                   - Stop tinyFaaS services using systemd"
 	@echo "  make unit-test              - Run unit tests"
@@ -33,16 +33,22 @@ help:
 
 .PHONY: bin-name
 bin-name:
-	@echo "tf-manager-$(OS)-$(ARCH) tf-rproxy-$(OS)-$(ARCH)"
+	@echo "tf-server-$(OS)-$(ARCH) tf-queue-worker-$(OS)-$(ARCH) tf-gateway-$(OS)-$(ARCH)"
 
 .PHONY: build
-build: tf-manager-${OS}-${ARCH} tf-rproxy-${OS}-${ARCH} tf-gateway-${OS}-${ARCH}
+build: tf-server-${OS}-${ARCH} tf-queue-worker-${OS}-${ARCH} tf-gateway-${OS}-${ARCH}
 
 .PHONY: build-manager
-build-manager: tf-manager-${OS}-${ARCH}
+build-manager: tf-server-${OS}-${ARCH}
 
 .PHONY: build-rproxy
-build-rproxy: tf-rproxy-${OS}-${ARCH}
+build-rproxy: tf-server-${OS}-${ARCH}
+
+.PHONY: build-server
+build-server: tf-server-${OS}-${ARCH}
+
+.PHONY: build-queue-worker
+build-queue-worker: tf-queue-worker-${OS}-${ARCH}
 
 .PHONY: build-gateway
 build-gateway: tf-gateway-${OS}-${ARCH}
@@ -62,6 +68,8 @@ clean:
 	@echo "Cleaning build artifacts..."
 	rm -f tf-manager-*
 	rm -f tf-rproxy-*
+	rm -f tf-server-*
+	rm -f tf-queue-worker-*
 	rm -f tf-gateway-*
 	rm -f tinyfaas-*
 	@echo "Running additional clean-up script..."
@@ -95,27 +103,28 @@ build-runtime-images:
 install: clean-all build build-runtime-images
 	@echo "Installing binaries to $(BINDIR)..."
 	sudo install -d $(BINDIR)
-	sudo install -m 755 tf-manager-$(OS)-$(ARCH) $(BINDIR)/tf-manager
-	sudo install -m 755 tf-rproxy-$(OS)-$(ARCH) $(BINDIR)/tf-rproxy
+	sudo install -m 755 tf-server-$(OS)-$(ARCH) $(BINDIR)/tf-server
+	sudo install -m 755 tf-queue-worker-$(OS)-$(ARCH) $(BINDIR)/tf-queue-worker
 	sudo install -m 755 tf-gateway-$(OS)-$(ARCH) $(BINDIR)/tf-gateway
 	@echo "Creating working directory..."
 	sudo install -d /var/lib/tinyfaas
 	@echo "Installing systemd service files to $(SYSTEMD_DIR)..."
 	sudo install -d $(SYSTEMD_DIR)
-	sudo install -m 644 systemd/tf-rproxy.service $(SYSTEMD_DIR)/
-	sudo install -m 644 systemd/tf-manager.service $(SYSTEMD_DIR)/
+	sudo install -m 644 systemd/tf-server.service $(SYSTEMD_DIR)/
+	sudo install -m 644 systemd/tf-nats.service $(SYSTEMD_DIR)/
+	sudo install -m 644 systemd/tf-queue-worker.service $(SYSTEMD_DIR)/
 	sudo install -m 644 systemd/tf-gateway.service $(SYSTEMD_DIR)/
 	@echo ""
 	@echo "Installation complete. To enable and start the services:"
 	@echo "  sudo systemctl daemon-reload"
-	@echo "  sudo systemctl enable tf-gateway tf-rproxy tf-manager"
-	@echo "  sudo systemctl start tf-gateway tf-rproxy tf-manager"
+	@echo "  sudo systemctl enable tf-gateway tf-server tf-nats tf-queue-worker"
+	@echo "  sudo systemctl start tf-gateway tf-server tf-nats tf-queue-worker"
 
 .PHONY: uninstall
 uninstall:
 	@echo "Removing binaries and service files..."
-	sudo rm -f $(BINDIR)/tf-manager $(BINDIR)/tf-rproxy $(BINDIR)/tf-gateway
-	sudo rm -f $(SYSTEMD_DIR)/tf-manager.service $(SYSTEMD_DIR)/tf-rproxy.service $(SYSTEMD_DIR)/tf-gateway.service
+	sudo rm -f $(BINDIR)/tf-manager $(BINDIR)/tf-rproxy $(BINDIR)/tf-server $(BINDIR)/tf-queue-worker $(BINDIR)/tf-gateway
+	sudo rm -f $(SYSTEMD_DIR)/tf-manager.service $(SYSTEMD_DIR)/tf-rproxy.service $(SYSTEMD_DIR)/tf-server.service $(SYSTEMD_DIR)/tf-nats.service $(SYSTEMD_DIR)/tf-queue-worker.service $(SYSTEMD_DIR)/tf-gateway.service
 	@echo "Uninstall complete"
 
 .PHONY: down
@@ -147,19 +156,17 @@ pkg/docker/runtimes-$(arch)/$(runtime): pkg/docker/runtimes/$(runtime)/Dockerfil
 endef
 $(foreach arch,$(SUPPORTED_ARCH),$(foreach runtime,$(RUNTIMES),$(eval $(runtime_build))))
 
-# Build manager binary (embeds runtime source files, base images built at startup)
-tf-manager-darwin-%: pkg/docker/runtimes-% $(GO_FILES)
-	GOOS=darwin GOARCH=$* go build -buildvcs=false -o $@ -v $(PKG)/cmd/manager
+tf-server-darwin-%: pkg/docker/runtimes-% $(GO_FILES)
+	GOOS=darwin GOARCH=$* go build -buildvcs=false -o $@ -v $(PKG)/cmd/server
 
-tf-manager-linux-%: pkg/docker/runtimes-% $(GO_FILES)
-	GOOS=linux GOARCH=$* go build -buildvcs=false -o $@ -v $(PKG)/cmd/manager
+tf-server-linux-%: pkg/docker/runtimes-% $(GO_FILES)
+	GOOS=linux GOARCH=$* go build -buildvcs=false -o $@ -v $(PKG)/cmd/server
 
-# Build rproxy binary (standalone, no runtime dependencies)
-tf-rproxy-darwin-%: $(GO_FILES)
-	GOOS=darwin GOARCH=$* go build -buildvcs=false -o $@ -v $(PKG)/cmd/rproxy
+tf-queue-worker-darwin-%: $(GO_FILES)
+	GOOS=darwin GOARCH=$* go build -buildvcs=false -o $@ -v $(PKG)/cmd/queue-worker
 
-tf-rproxy-linux-%: $(GO_FILES)
-	GOOS=linux GOARCH=$* go build -buildvcs=false -o $@ -v $(PKG)/cmd/rproxy
+tf-queue-worker-linux-%: $(GO_FILES)
+	GOOS=linux GOARCH=$* go build -buildvcs=false -o $@ -v $(PKG)/cmd/queue-worker
 
 # Build gateway binary (standalone, no runtime dependencies)
 tf-gateway-darwin-%: $(GO_FILES)

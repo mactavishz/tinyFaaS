@@ -1,0 +1,16 @@
+[Unit]
+Description=tinyFaaS NATS Streaming
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f tf-nats
+ExecStart=/usr/bin/docker run --rm --name tf-nats -p 127.0.0.1:4222:4222 docker.io/library/nats-streaming:0.25.6 -m 8222 --store=file --dir=/data --cluster_id=faas-cluster
+ExecStop=/usr/bin/docker stop tf-nats
+Restart=always
+RestartSec=5
+SyslogIdentifier=tf-nats
+
+[Install]
+WantedBy=multi-user.target

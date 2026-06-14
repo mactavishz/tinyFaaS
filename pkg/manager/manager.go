@@ -35,6 +35,12 @@ type ManagementService struct {
 	rproxyPort       string
 	autoscaler       *autoscaler.AutoScaler
 	logger           *slog.Logger
+	routeAddHook     func(name string, ips []string, labels map[string]string) error
+	routeUpdateHook  func(name string) error
+	routeDeleteHook  func(name string) error
+	scaleUpHook      func(name string, timestamp time.Time, duration time.Duration, cold bool)
+	scaleDownHook    func(name string, timestamp time.Time, duration time.Duration)
+	resetHook        func(name string)
 }
 
 type Backend interface {
@@ -66,6 +72,22 @@ func New(id string, rproxyPort string, tfBackend Backend, logger *slog.Logger) *
 	}
 
 	return ms
+}
+
+func (ms *ManagementService) SetRouteHooks(add func(name string, ips []string, labels map[string]string) error, update func(name string) error, del func(name string) error) {
+	ms.routeAddHook = add
+	ms.routeUpdateHook = update
+	ms.routeDeleteHook = del
+}
+
+func (ms *ManagementService) SetCallgraphHooks(
+	scaleUp func(name string, timestamp time.Time, duration time.Duration, cold bool),
+	scaleDown func(name string, timestamp time.Time, duration time.Duration),
+	reset func(name string),
+) {
+	ms.scaleUpHook = scaleUp
+	ms.scaleDownHook = scaleDown
+	ms.resetHook = reset
 }
 
 func createTempArchiveFile(prefix string) (*os.File, error) {
@@ -168,48 +190,8 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 		"function", name,
 		"duration", coldStartDuration)
 
-	// tell rproxy about the new function
-	// curl -X PUT http://<rproxyAddr>:<rproxyPort>/config -d '{"name": "<name>", "ips": ["<ip1>", "<ip2>"]}'
-	d := struct {
-		FunctionName string            `json:"name"`
-		FunctionIPs  []string          `json:"ips"`
-		Labels       map[string]string `json:"labels,omitempty"`
-	}{
-		FunctionName: name,
-		FunctionIPs:  fh.IPs(),
-		Labels:       labels,
-	}
-
-	b, err := json.Marshal(d)
-	if err != nil {
+	if err := ms.notifyRouteAdd(name, fh.IPs(), labels); err != nil {
 		return err
-	}
-
-	ms.logger.Info("notify rproxy", "function", name, "ips", fh.IPs())
-
-	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%s/config", ms.rproxyPort), bytes.NewBuffer(b))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil && !errors.Is(err, io.EOF) {
-		ms.logger.Error("error notifying rproxy", "function", name, "err", err)
-		return err
-	}
-	defer resp.Body.Close()
-
-	r, err := io.ReadAll(resp.Body)
-	if err != nil {
-		ms.logger.Error("error reading rproxy response", "function", name, "err", err)
-		return err
-	}
-
-	ms.logger.Info("rproxy response", "response", string(r))
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to notify rproxy, status code %d", resp.StatusCode)
 	}
 
 	// If this is a redeployment, reset callgraph stats first before recording fresh cold start
@@ -364,39 +346,8 @@ func (ms *ManagementService) Delete(name string) error {
 		return err
 	}
 
-	// tell rproxy about the delete function
-	d := struct {
-		FunctionName string `json:"name"`
-	}{
-		FunctionName: name,
-	}
-
-	b, err := json.Marshal(d)
-	if err != nil {
+	if err := ms.notifyRouteDelete(name); err != nil {
 		return err
-	}
-
-	ms.logger.Info("notify rproxy", "function", name)
-	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://127.0.0.1:%s/config", ms.rproxyPort), bytes.NewBuffer(b))
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return err
-	}
-	defer resp.Body.Close()
-
-	r, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	ms.logger.Info("rproxy response", "response", string(r))
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("rproxy returned status code %d", resp.StatusCode)
 	}
 
 	delete(ms.functionHandlers, name)
@@ -472,8 +423,97 @@ func (ms *ManagementService) UrlUpload(name string, env string, replicas int, fu
 	return nil
 }
 
+func (ms *ManagementService) notifyRouteAdd(name string, ips []string, labels map[string]string) error {
+	if ms.routeAddHook != nil {
+		return ms.routeAddHook(name, ips, labels)
+	}
+
+	d := struct {
+		FunctionName string            `json:"name"`
+		FunctionIPs  []string          `json:"ips"`
+		Labels       map[string]string `json:"labels,omitempty"`
+	}{
+		FunctionName: name,
+		FunctionIPs:  ips,
+		Labels:       labels,
+	}
+
+	b, err := json.Marshal(d)
+	if err != nil {
+		return err
+	}
+
+	ms.logger.Info("notify rproxy", "function", name, "ips", ips)
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%s/config", ms.rproxyPort), bytes.NewBuffer(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil && !errors.Is(err, io.EOF) {
+		ms.logger.Error("error notifying rproxy", "function", name, "err", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	ms.logger.Info("rproxy response", "response", string(body))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to notify rproxy, status code %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (ms *ManagementService) notifyRouteDelete(name string) error {
+	if ms.routeDeleteHook != nil {
+		return ms.routeDeleteHook(name)
+	}
+
+	d := struct {
+		FunctionName string `json:"name"`
+	}{
+		FunctionName: name,
+	}
+
+	b, err := json.Marshal(d)
+	if err != nil {
+		return err
+	}
+
+	ms.logger.Info("notify rproxy", "function", name)
+	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://127.0.0.1:%s/config", ms.rproxyPort), bytes.NewBuffer(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	ms.logger.Info("rproxy response", "response", string(body))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("rproxy returned status code %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // notifyScaleUp sends scale-up or cold start data to rproxy for callgraph tracking
 func (ms *ManagementService) notifyScaleUp(name string, timestamp time.Time, duration time.Duration, cold bool) {
+	if ms.scaleUpHook != nil {
+		ms.scaleUpHook(name, timestamp, duration, cold)
+		return
+	}
+
 	data := struct {
 		FunctionName string `json:"name"`
 		Timestamp    int64  `json:"timestamp"`   // Unix nanoseconds
@@ -521,6 +561,11 @@ func (ms *ManagementService) notifyScaleUp(name string, timestamp time.Time, dur
 
 // notifyScaleDown sends scale-down data to rproxy for callgraph tracking
 func (ms *ManagementService) notifyScaleDown(name string, timestamp time.Time, duration time.Duration) {
+	if ms.scaleDownHook != nil {
+		ms.scaleDownHook(name, timestamp, duration)
+		return
+	}
+
 	data := struct {
 		FunctionName string `json:"name"`
 		Timestamp    int64  `json:"timestamp"`   // Unix nanoseconds
@@ -564,6 +609,11 @@ func (ms *ManagementService) notifyScaleDown(name string, timestamp time.Time, d
 
 // notifyCallgraphReset notifies rproxy to reset callgraph stats for a redeployed function
 func (ms *ManagementService) notifyCallgraphReset(name string) {
+	if ms.resetHook != nil {
+		ms.resetHook(name)
+		return
+	}
+
 	data := struct {
 		FunctionName string `json:"name"`
 	}{

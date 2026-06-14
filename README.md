@@ -2,7 +2,7 @@
 
 This repository contains a tinyFaaS fork used as a research prototype.
 
-tinyFaaS is a lightweight Function-as-a-Service platform focused on constrained environments. The platform currently runs as three services: gateway, manager, and reverse proxy (rproxy), plus per-function containers.
+tinyFaaS is a lightweight Function-as-a-Service platform focused on constrained environments. The platform currently runs as a public gateway, a merged internal server, a NATS Streaming broker, and an async queue worker, plus per-function containers.
 
 ## Safety Notice
 
@@ -33,8 +33,8 @@ After installation, start the services with:
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable tf-gateway tf-rproxy tf-manager
-sudo systemctl start tf-gateway tf-rproxy tf-manager
+sudo systemctl enable tf-gateway tf-nats tf-server tf-queue-worker
+sudo systemctl start tf-gateway tf-nats tf-server tf-queue-worker
 ```
 
 Stop and uninstall services:
@@ -47,11 +47,12 @@ make down
 
 | Service | Default Bind | Purpose |
 | --- | --- | --- |
-| Gateway (`tf-gateway`) | `0.0.0.0:8080` | Public entrypoint. Routes `/fn/*` and `/system/*`. |
-| Manager (`tf-manager`) | `127.0.0.1:8001` | Deploy/list/delete/logs/scale/heartbeat control plane. |
-| RProxy (`tf-rproxy`) | `127.0.0.1:8000` | Invocation routing and callgraph/autoscaler integration. |
+| Gateway (`tf-gateway`) | `0.0.0.0:8080` | Public entrypoint. Routes `/fn/*`, `/async-fn/*`, and `/system/*`. |
+| Server (`tf-server`) | `127.0.0.1:8000` | Deploy/list/delete/logs, sync routing, autoscaler, callgraph, and async enqueue. |
+| NATS Streaming (`tf-nats`) | `127.0.0.1:4222` | Async invocation queue. |
+| Queue worker (`tf-queue-worker`) | n/a | Dequeues async requests and invokes `tf-server` via `/invoke/*`. |
 
-Standard invocation path is through the gateway: `/fn/{name}`.
+Standard synchronous invocation path is through the gateway: `/fn/{name}`. Async invocation uses `/async-fn/{name}`.
 
 ## Deploy and Manage Functions
 
@@ -135,13 +136,13 @@ Use HTTP `GET` or `POST`:
 curl -X POST http://localhost/fn/echo-js -d 'hello'
 ```
 
-Asynchronous invocation is enabled by sending header `X-Tinyfaas-Async` (any value):
+Asynchronous invocation uses `/async-fn/{name}`:
 
 ```sh
-curl -H "X-Tinyfaas-Async: true" http://localhost/fn/sieve
+curl -X POST http://localhost/async-fn/sieve -d 'hello'
 ```
 
-Async requests return `202 Accepted` without function output.
+Async requests return `202 Accepted` with an empty body. Header-based async invocation is no longer supported; `/fn/{name}` is always synchronous.
 
 ## Management API (Gateway)
 
@@ -196,8 +197,13 @@ You can create a file at `/etc/default/tinyfaas` with environment variable overr
 | --- | --- | --- |
 | `GATEWAY_IP` | `0.0.0.0` | Gateway bind address. |
 | `GATEWAY_PORT` | `8080` | Gateway port. |
-| `MANAGER_PORT` | `8001` | Manager port (loopback). |
-| `RPROXY_PORT` | `8000` | RProxy port (loopback). |
+| `TINYFAAS_PORT` | `8000` | Merged internal server port (loopback). |
+| `TINYFAAS_NATS_URL` | `nats://127.0.0.1:4222` | NATS Streaming URL. |
+| `TINYFAAS_NATS_CLUSTER` | `faas-cluster` | NATS Streaming cluster ID. |
+| `TINYFAAS_NATS_SUBJECT` | `faas-request` | Async invocation subject. |
+| `TINYFAAS_NATS_QUEUE_GROUP` | `faas` | Queue worker group. |
+| `TINYFAAS_QUEUE_ACK_WAIT` | `5m5s` | Queue redelivery wait for unacked messages. |
+| `TINYFAAS_QUEUE_MAX_INFLIGHT` | `1` | Maximum in-flight queued messages per worker. |
 | `ENV` | `development` | `development` enables callgraph debug endpoints. |
 | `BACKEND` | `docker` | Runtime backend. |
 | `AUTOSCALER_ENABLED` | `true` | Enable autoscaler integration. |
@@ -212,15 +218,16 @@ You can create a file at `/etc/default/tinyfaas` with environment variable overr
 Check service status:
 
 ```sh
-sudo systemctl status tf-gateway tf-rproxy tf-manager
+sudo systemctl status tf-gateway tf-nats tf-server tf-queue-worker
 ```
 
 Stream logs:
 
 ```sh
 sudo journalctl -u tf-gateway -o cat -f
-sudo journalctl -u tf-rproxy -o cat -f
-sudo journalctl -u tf-manager -o cat -f
+sudo journalctl -u tf-nats -o cat -f
+sudo journalctl -u tf-server -o cat -f
+sudo journalctl -u tf-queue-worker -o cat -f
 ```
 
 ## Testing
@@ -243,7 +250,7 @@ You can override gateway URL for integration tests with `TINYFAAS_TEST_GATEWAY_U
 
 | Command | Description |
 | --- | --- |
-| `make build` | Build `tf-manager`, `tf-rproxy`, `tf-gateway`. |
+| `make build` | Build `tf-server`, `tf-queue-worker`, and `tf-gateway`. |
 | `make build-runtime-images` | Pre-build runtime base images. |
 | `make install` | Install binaries and `systemd` units. |
 | `make down` | Stop services, uninstall binaries/units, and clean artifacts. |

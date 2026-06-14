@@ -74,40 +74,29 @@ func TestFunctionStats(t *testing.T) {
 	assert.Equal(t, len(stats.Invocations), len(baseline.Invocations)+3)
 
 	// send 2 additional async invocations
-	asyncHeaders := map[string]string{"X-Tinyfaas-Async": "true"}
 	for i := 0; i < 2; i++ {
 		payload := []byte(fmt.Sprintf("async-%d", i))
-		status, _ := testutil.InvokeTinyFaaS(t, baseURL, fnName, http.MethodPost, payload, asyncHeaders)
+		status, _ := testutil.InvokeTinyFaaSAsync(t, baseURL, fnName, http.MethodPost, payload, nil)
 		require.Equal(t, http.StatusAccepted, status)
 	}
 
-	stats = waitForFunctionStatsCountGreaterEqual(t, baseURL, fnName, len(baseline.Invocations)+2, 30*time.Second)
+	stats = waitForFunctionStatsCountGreaterEqual(t, baseURL, fnName, len(baseline.Invocations)+5, 30*time.Second)
 	assert.Equal(t, fnName, stats.Function.Name)
 	assert.Equal(t, "tinyfaas", stats.Function.Namespace)
 	assert.Equal(t, stats.Summary.SuccessfulInvocations, baseline.Summary.SuccessfulInvocations+5)
 	assert.Equal(t, baseline.Summary.FailedInvocations, stats.Summary.FailedInvocations)
-	assert.Equal(t, stats.Summary.StatusCodes["202"], baseline.Summary.StatusCodes["202"]+2)
+	assert.Equal(t, stats.Summary.StatusCodes["200"], baseline.Summary.StatusCodes["200"]+5)
 	assert.Equal(t, len(stats.Invocations), len(baseline.Invocations)+5)
 
 	latest := stats.Invocations[len(stats.Invocations)-5:]
-	latest200 := 0
-	latest202 := 0
 	for _, invocation := range latest {
 		assert.Equal(t, http.MethodPost, invocation.Method)
-		assert.Equal(t, "/fn/"+fnName, invocation.Path)
-		assert.Contains(t, []int{http.StatusOK, http.StatusAccepted}, invocation.StatusCode)
+		assert.Contains(t, []string{"/invoke/" + fnName}, invocation.Path)
+		assert.Equal(t, http.StatusOK, invocation.StatusCode)
 		assert.True(t, invocation.Success)
 		assert.False(t, invocation.FinishedAt.Before(invocation.StartedAt))
 		assert.Greater(t, invocation.DurationNS, int64(0))
-		if invocation.StatusCode == http.StatusOK {
-			latest200++
-		}
-		if invocation.StatusCode == http.StatusAccepted {
-			latest202++
-		}
 	}
-	assert.Equal(t, 3, latest200)
-	assert.Equal(t, 2, latest202)
 
 	testutil.RemoveTinyFaaSStackFilter(t, baseURL, stackPath, fnName)
 	waitForFunctionStatsStatusEqual(t, baseURL, fnName, http.StatusNotFound, 30*time.Second)

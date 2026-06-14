@@ -14,17 +14,15 @@ import (
 )
 
 const (
-	defaultRProxyPort  = "8000"
-	defaultManagerPort = "8001"
+	defaultTinyFaaSPort = "8000"
 )
 
 // Gateway handles incoming requests and routes them to appropriate backends
 type Gateway struct {
-	rproxyPort  string
-	managerPort string
-	mode        string
-	logger      *slog.Logger
-	stats       *functionStatsStore
+	tinyfaasPort string
+	mode         string
+	logger       *slog.Logger
+	stats        *functionStatsStore
 }
 
 // Option is a functional option for configuring Gateway
@@ -33,14 +31,20 @@ type Option func(*Gateway)
 // WithRProxyPort sets the rproxy port
 func WithRProxyPort(port string) Option {
 	return func(g *Gateway) {
-		g.rproxyPort = port
+		g.tinyfaasPort = port
 	}
 }
 
 // WithManagerPort sets the manager port
 func WithManagerPort(port string) Option {
 	return func(g *Gateway) {
-		g.managerPort = port
+		g.tinyfaasPort = port
+	}
+}
+
+func WithTinyFaaSPort(port string) Option {
+	return func(g *Gateway) {
+		g.tinyfaasPort = port
 	}
 }
 
@@ -54,10 +58,9 @@ func WithMode(mode string) Option {
 // New creates a new Gateway instance
 func New(logger *slog.Logger, opts ...Option) *Gateway {
 	g := &Gateway{
-		rproxyPort:  defaultRProxyPort,
-		managerPort: defaultManagerPort,
-		logger:      logger,
-		stats:       NewFunctionStatsStore(),
+		tinyfaasPort: defaultTinyFaaSPort,
+		logger:       logger,
+		stats:        NewFunctionStatsStore(),
 	}
 
 	for _, opt := range opts {
@@ -77,12 +80,12 @@ func (g *Gateway) IsProd() bool {
 
 // rproxyAddr returns the full rproxy address
 func (g *Gateway) rproxyAddr() string {
-	return fmt.Sprintf("127.0.0.1:%s", g.rproxyPort)
+	return fmt.Sprintf("127.0.0.1:%s", g.tinyfaasPort)
 }
 
 // managerAddr returns the full manager address
 func (g *Gateway) managerAddr() string {
-	return fmt.Sprintf("127.0.0.1:%s", g.managerPort)
+	return fmt.Sprintf("127.0.0.1:%s", g.tinyfaasPort)
 }
 
 // extractSourceIP extracts the real client IP from the request
@@ -187,7 +190,14 @@ func (g *Gateway) InvokeMiddleware(next http.HandlerFunc) http.HandlerFunc {
 // HandleFunctionInvoke handles /fn/* requests to rproxy
 func (g *Gateway) HandleFunctionInvoke(w http.ResponseWriter, r *http.Request) {
 	// Rewrite path: /fn/funcname -> /invoke/funcname
+	r.Header.Del("X-Tinyfaas-Async")
 	r.URL.Path = "/invoke" + strings.TrimPrefix(r.URL.Path, "/fn")
+	g.proxyRequest(w, r, g.rproxyAddr())
+}
+
+func (g *Gateway) HandleAsyncFunctionInvoke(w http.ResponseWriter, r *http.Request) {
+	r.Header.Del("X-Tinyfaas-Async")
+	r.URL.Path = "/async-invoke" + strings.TrimPrefix(r.URL.Path, "/async-fn")
 	g.proxyRequest(w, r, g.rproxyAddr())
 }
 
@@ -312,17 +322,23 @@ func (g *Gateway) HandleCallgraphEdge(w http.ResponseWriter, r *http.Request) {
 	g.proxyRequest(w, r, g.rproxyAddr())
 }
 
+func (g *Gateway) HandleFunctionStatsProxy(w http.ResponseWriter, r *http.Request) {
+	r.URL.Path = "/stats/function/" + strings.TrimPrefix(r.URL.Path, "/system/stats/function/")
+	g.proxyRequest(w, r, g.managerAddr())
+}
+
 // RegisterHandlers registers all gateway handlers on the provided mux
 func (g *Gateway) RegisterHandlers(mux *http.ServeMux) {
 	// Function invocation endpoint
 	mux.Handle("/fn/", g.recordInvocationStats(g.InvokeMiddleware(g.HandleFunctionInvoke)))
+	mux.Handle("/async-fn/", g.InvokeMiddleware(g.HandleAsyncFunctionInvoke))
 
 	// System endpoints with access control
 	mux.HandleFunc("/system/scale-up", g.HandleSystemScaleUp)
 	mux.HandleFunc("/system/heartbeat", g.HandleSystemHeartbeat)
 	mux.HandleFunc("/system/request-start", g.HandleSystemRequestStart)
 	mux.HandleFunc("/system/request-finish", g.HandleSystemRequestFinish)
-	mux.HandleFunc("/system/stats/function/", g.HandleFunctionStats)
+	mux.HandleFunc("/system/stats/function/", g.HandleFunctionStatsProxy)
 
 	// Other system endpoints
 	mux.HandleFunc("/system/", g.HandleSystemOther)
@@ -340,10 +356,10 @@ func (g *Gateway) RegisterHandlers(mux *http.ServeMux) {
 
 // GetRProxyPort returns the rproxy port
 func (g *Gateway) GetRProxyPort() string {
-	return g.rproxyPort
+	return g.tinyfaasPort
 }
 
 // GetManagerPort returns the manager port
 func (g *Gateway) GetManagerPort() string {
-	return g.managerPort
+	return g.tinyfaasPort
 }

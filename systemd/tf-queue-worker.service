@@ -1,0 +1,16 @@
+[Unit]
+Description=tinyFaaS async queue worker
+After=network.target tf-server.service tf-nats.service
+Requires=tf-server.service tf-nats.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tf-queue-worker
+EnvironmentFile=-/etc/default/tinyfaas
+WorkingDirectory=/var/lib/tinyfaas
+Restart=always
+RestartSec=5
+SyslogIdentifier=tf-queue-worker
+
+[Install]
+WantedBy=multi-user.target

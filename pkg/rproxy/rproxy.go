@@ -50,6 +50,12 @@ type RProxy struct {
 	heartbeatMux      sync.Mutex
 	heartbeatStopChan chan struct{}
 	heartbeatDoneChan chan struct{}
+
+	scaleUpHook        func(name string, cold bool) error
+	requestStartHook   func(name string) error
+	requestFinishHook  func(name string)
+	heartbeatHook      func(name string) error
+	heartbeatBatchHook func(names []string) error
 }
 
 func (r *Route) PickIP() (string, error) {
@@ -131,6 +137,20 @@ func (r *RProxy) SetGatewayAddr(addr string) {
 	r.logger.Debug("gateway url set", "url", r.gatewayAddr)
 	r.logger.Debug("heartbeat url set", "url", r.heatbeatAddr)
 	r.logger.Debug("scale-up url set", "url", r.scaleUpAddr)
+}
+
+func (r *RProxy) SetScaleUpHook(hook func(name string, cold bool) error) {
+	r.scaleUpHook = hook
+}
+
+func (r *RProxy) SetRequestHooks(start func(name string) error, finish func(name string)) {
+	r.requestStartHook = start
+	r.requestFinishHook = finish
+}
+
+func (r *RProxy) SetHeartbeatHooks(single func(name string) error, batch func(names []string) error) {
+	r.heartbeatHook = single
+	r.heartbeatBatchHook = batch
 }
 
 // CallgraphEnabled returns whether callgraph tracking is enabled for a given function,
@@ -269,24 +289,8 @@ func (r *RProxy) waitForRouteReady(name string, timeout time.Duration) (*Route, 
 
 func (r *RProxy) Call(name string, payload []byte, async bool, header http.Header) (int, []byte) {
 	startTime := time.Now()
-
 	if async {
-		if _, ok := r.getRouteSnapshot(name); !ok {
-			r.logger.Error("function not found", "name", name)
-			return http.StatusNotFound, nil
-		}
-
-		asyncPayload := append([]byte(nil), payload...)
-		asyncHeader := header.Clone()
-
-		go func() {
-			status, _ := r.invoke(name, asyncPayload, asyncHeader, startTime)
-			if status >= http.StatusBadRequest {
-				r.logger.Warn("async invocation failed", "name", name, "status", status)
-			}
-		}()
-
-		return http.StatusAccepted, nil
+		r.logger.Warn("legacy rproxy async flag ignored; use /async-fn endpoint", "name", name)
 	}
 
 	return r.invoke(name, payload, header, startTime)
@@ -635,6 +639,10 @@ func (r *RProxy) flushHeartbeats() {
 
 // sendBatchHeartbeat sends a batch heartbeat request to the manager.
 func (r *RProxy) sendBatchHeartbeat(functions []string) error {
+	if r.heartbeatBatchHook != nil {
+		return r.heartbeatBatchHook(functions)
+	}
+
 	reqData := struct {
 		Functions []string `json:"functions"`
 	}{
@@ -682,6 +690,10 @@ func (r *RProxy) sendBatchHeartbeat(functions []string) error {
 // cold=true means this is a user-facing cold start
 // cold=false means this is a proactive prewarm
 func (r *RProxy) scaleUpFunction(name string, cold bool) error {
+	if r.scaleUpHook != nil {
+		return r.scaleUpHook(name, cold)
+	}
+
 	reqData := struct {
 		FunctionName string `json:"name"`
 		Cold         bool   `json:"cold"`
@@ -732,6 +744,10 @@ func (r *RProxy) scaleUpFunction(name string, cold bool) error {
 }
 
 func (r *RProxy) notifyRequestStart(name string) error {
+	if r.requestStartHook != nil {
+		return r.requestStartHook(name)
+	}
+
 	reqData := struct {
 		FunctionName string `json:"name"`
 	}{
@@ -762,6 +778,11 @@ func (r *RProxy) notifyRequestStart(name string) error {
 }
 
 func (r *RProxy) notifyRequestFinish(name string) error {
+	if r.requestFinishHook != nil {
+		r.requestFinishHook(name)
+		return nil
+	}
+
 	reqData := struct {
 		FunctionName string `json:"name"`
 	}{

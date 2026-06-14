@@ -1,0 +1,17 @@
+[Unit]
+Description=tinyFaaS merged runtime server
+After=network.target docker.service tf-nats.service
+Requires=docker.service tf-nats.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p /var/lib/tinyfaas/tmp
+ExecStart=/usr/local/bin/tf-server
+EnvironmentFile=-/etc/default/tinyfaas
+WorkingDirectory=/var/lib/tinyfaas
+Restart=always
+RestartSec=5
+SyslogIdentifier=tf-server
+
+[Install]
+WantedBy=multi-user.target

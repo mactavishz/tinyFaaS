@@ -218,7 +218,8 @@ func main() {
 			return
 		}
 
-		async := req.Header.Get("X-Tinyfaas-Async") != ""
+		req.Header.Del("X-Tinyfaas-Async")
+		async := false
 
 		// Determine the caller by checking the X-Faas-Source-Ip header
 		// This header is set by Gateway to preserve the original source IP

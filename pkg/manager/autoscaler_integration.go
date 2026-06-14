@@ -36,6 +36,7 @@ func NewTinyFaaSScaleOp(ms *ManagementService, logger *slog.Logger) *TinyFaaSSca
 func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 	op.ms.mux.Lock()
 	handler, exists := op.ms.functionHandlers[functionName]
+	config := op.ms.functionConfigs[functionName]
 	op.ms.mux.Unlock()
 
 	if !exists {
@@ -53,7 +54,7 @@ func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 
 	// Stop the containers
 	if err := handler.Stop(); err != nil {
-		if restoreErr := op.notifyRProxyAdd(functionName, ips); restoreErr != nil {
+		if restoreErr := op.notifyRProxyAdd(functionName, ips, config.Labels); restoreErr != nil {
 			op.logger.Error("failed to restore rproxy route after scale down failure",
 				"function", functionName,
 				"err", restoreErr)
@@ -80,6 +81,7 @@ func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 func (op *TinyFaaSScaleOp) ScaleUp(functionName string) error {
 	op.ms.mux.Lock()
 	handler, exists := op.ms.functionHandlers[functionName]
+	config := op.ms.functionConfigs[functionName]
 	op.ms.mux.Unlock()
 
 	if !exists {
@@ -92,7 +94,7 @@ func (op *TinyFaaSScaleOp) ScaleUp(functionName string) error {
 	}
 
 	// Notify rproxy to add function back to routing table
-	if err := op.notifyRProxyAdd(functionName, handler.IPs()); err != nil {
+	if err := op.notifyRProxyAdd(functionName, handler.IPs(), config.Labels); err != nil {
 		op.logger.Error("failed to notify rproxy", "function", functionName, "err", err)
 		return fmt.Errorf("function restarted but rproxy notification failed: %w", err)
 	}
@@ -102,13 +104,19 @@ func (op *TinyFaaSScaleOp) ScaleUp(functionName string) error {
 }
 
 // notifyRProxyAdd notifies rproxy to add a function to the routing table
-func (op *TinyFaaSScaleOp) notifyRProxyAdd(functionName string, ips []string) error {
+func (op *TinyFaaSScaleOp) notifyRProxyAdd(functionName string, ips []string, labels map[string]string) error {
+	if op.ms.routeAddHook != nil {
+		return op.ms.routeAddHook(functionName, ips, labels)
+	}
+
 	d := struct {
-		FunctionName string   `json:"name"`
-		FunctionIPs  []string `json:"ips"`
+		FunctionName string            `json:"name"`
+		FunctionIPs  []string          `json:"ips"`
+		Labels       map[string]string `json:"labels,omitempty"`
 	}{
 		FunctionName: functionName,
 		FunctionIPs:  ips,
+		Labels:       labels,
 	}
 
 	b, err := json.Marshal(d)
@@ -137,6 +145,10 @@ func (op *TinyFaaSScaleOp) notifyRProxyAdd(functionName string, ips []string) er
 
 // notifyRProxyClearIPs notifies rproxy to remove a function's IPs from the routing table
 func (op *TinyFaaSScaleOp) notifyRProxyClearIPs(functionName string) error {
+	if op.ms.routeUpdateHook != nil {
+		return op.ms.routeUpdateHook(functionName)
+	}
+
 	d := struct {
 		FunctionName string `json:"name"`
 	}{
