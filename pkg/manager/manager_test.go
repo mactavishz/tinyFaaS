@@ -3,6 +3,7 @@ package manager
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -64,10 +65,13 @@ type testHandler struct {
 	ips          []string
 	running      bool
 	startCalls   int
+	restartCalls int
 	stopCalls    int
 	destroyCalls int
 	stopErr      error
 	startCh      chan struct{}
+	restartCh    chan struct{}
+	restartBlock chan struct{}
 	stopCh       chan struct{}
 	destroyCh    chan struct{}
 }
@@ -107,8 +111,17 @@ func (h *testHandler) Stop() error {
 
 func (h *testHandler) Restart() error {
 	h.mu.Lock()
+	h.restartCalls++
 	h.running = true
+	ch := h.restartCh
+	block := h.restartBlock
 	h.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+	if block != nil {
+		<-block
+	}
 	return nil
 }
 
@@ -144,6 +157,12 @@ func (h *testHandler) counts() (start, stop, destroy int) {
 	return h.startCalls, h.stopCalls, h.destroyCalls
 }
 
+func (h *testHandler) restartCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.restartCalls
+}
+
 func newManagerWithRProxy(t *testing.T, backend Backend) (*ManagementService, *rproxyRecorder) {
 	t.Helper()
 
@@ -169,6 +188,13 @@ type recordedRequest struct {
 	body   string
 }
 
+type scaleUpRecord struct {
+	FunctionName string `json:"name"`
+	Timestamp    int64  `json:"timestamp"`
+	Duration     int64  `json:"duration_ns"`
+	Cold         bool   `json:"cold"`
+}
+
 func newRProxyRecorder() *rproxyRecorder {
 	return &rproxyRecorder{}
 }
@@ -192,6 +218,23 @@ func (r *rproxyRecorder) count(method string, path string) int {
 		}
 	}
 	return count
+}
+
+func (r *rproxyRecorder) scaleUpRecords() []scaleUpRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	records := make([]scaleUpRecord, 0)
+	for _, req := range r.requests {
+		if req.method != http.MethodPost || req.path != "/callgraph/scaleup" {
+			continue
+		}
+		var record scaleUpRecord
+		if err := json.Unmarshal([]byte(req.body), &record); err == nil {
+			records = append(records, record)
+		}
+	}
+	return records
 }
 
 func makeZipArchive(t *testing.T) string {
@@ -337,6 +380,114 @@ func TestScaleDownFailureRestoresRProxyRoute(t *testing.T) {
 	assert.True(t, handler.IsRunning())
 	assert.Equal(t, 1, rproxy.count(http.MethodPatch, "/config"))
 	assert.Equal(t, 1, rproxy.count(http.MethodPut, "/config"))
+}
+
+func TestScaleUpRecordsOnlyClaimingPrewarmDuringDemandRace(t *testing.T) {
+	backend := newTestBackend()
+	ms, rproxy := newManagerWithRProxy(t, backend)
+	as := installAutoScaler(ms)
+
+	restartStarted := make(chan struct{})
+	restartRelease := make(chan struct{})
+	handler := &testHandler{
+		name:         "echo",
+		ips:          []string{"10.0.0.1"},
+		restartCh:    restartStarted,
+		restartBlock: restartRelease,
+	}
+	ms.functionHandlers["echo"] = handler
+	ms.functionConfigs["echo"] = FunctionConfig{Name: "echo"}
+	as.RegisterFunctionWithState("echo", map[string]string{"com.tinyfaas.scale.zero": "true"}, autoscaler.StateScaledDown)
+
+	prewarmDone := make(chan error, 1)
+	go func() {
+		prewarmDone <- ms.ScaleUp("echo", false)
+	}()
+	require.Eventually(t, func() bool {
+		select {
+		case <-restartStarted:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	demandDone := make(chan error, 1)
+	go func() {
+		demandDone <- ms.ScaleUp("echo", true)
+	}()
+
+	close(restartRelease)
+	require.NoError(t, <-prewarmDone)
+	require.NoError(t, <-demandDone)
+
+	assert.Equal(t, 1, handler.restartCount())
+	records := rproxy.scaleUpRecords()
+	require.Len(t, records, 1)
+	assert.Equal(t, "echo", records[0].FunctionName)
+	assert.False(t, records[0].Cold)
+}
+
+func TestScaleUpRecordsOnlyClaimingDemandDuringPrewarmRace(t *testing.T) {
+	backend := newTestBackend()
+	ms, rproxy := newManagerWithRProxy(t, backend)
+	as := installAutoScaler(ms)
+
+	restartStarted := make(chan struct{})
+	restartRelease := make(chan struct{})
+	handler := &testHandler{
+		name:         "echo",
+		ips:          []string{"10.0.0.1"},
+		restartCh:    restartStarted,
+		restartBlock: restartRelease,
+	}
+	ms.functionHandlers["echo"] = handler
+	ms.functionConfigs["echo"] = FunctionConfig{Name: "echo"}
+	as.RegisterFunctionWithState("echo", map[string]string{"com.tinyfaas.scale.zero": "true"}, autoscaler.StateScaledDown)
+
+	demandDone := make(chan error, 1)
+	go func() {
+		demandDone <- ms.ScaleUp("echo", true)
+	}()
+	require.Eventually(t, func() bool {
+		select {
+		case <-restartStarted:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	prewarmDone := make(chan error, 1)
+	go func() {
+		prewarmDone <- ms.ScaleUp("echo", false)
+	}()
+
+	close(restartRelease)
+	require.NoError(t, <-demandDone)
+	require.NoError(t, <-prewarmDone)
+
+	assert.Equal(t, 1, handler.restartCount())
+	records := rproxy.scaleUpRecords()
+	require.Len(t, records, 1)
+	assert.Equal(t, "echo", records[0].FunctionName)
+	assert.True(t, records[0].Cold)
+}
+
+func TestScaleUpActiveFunctionDoesNotRecordScaleUp(t *testing.T) {
+	backend := newTestBackend()
+	ms, rproxy := newManagerWithRProxy(t, backend)
+	as := installAutoScaler(ms)
+
+	handler := &testHandler{name: "echo", ips: []string{"10.0.0.1"}, running: true}
+	ms.functionHandlers["echo"] = handler
+	ms.functionConfigs["echo"] = FunctionConfig{Name: "echo", Running: true}
+	as.RegisterFunctionWithState("echo", map[string]string{"com.tinyfaas.scale.zero": "true"}, autoscaler.StateActive)
+
+	require.NoError(t, ms.ScaleUp("echo", true))
+
+	assert.Equal(t, 0, handler.restartCount())
+	assert.Empty(t, rproxy.scaleUpRecords())
 }
 
 func TestGetReturnsFunctionConfig(t *testing.T) {

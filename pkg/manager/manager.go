@@ -30,6 +30,7 @@ type ManagementService struct {
 	backend          Backend
 	functionHandlers map[string]Handler
 	functionConfigs  map[string]FunctionConfig
+	scaleUpClaims    map[string]struct{}
 	mux              sync.Mutex
 	rproxyPort       string
 	autoscaler       *autoscaler.AutoScaler
@@ -59,6 +60,7 @@ func New(id string, rproxyPort string, tfBackend Backend, logger *slog.Logger) *
 		backend:          tfBackend,
 		functionHandlers: make(map[string]Handler),
 		functionConfigs:  make(map[string]FunctionConfig),
+		scaleUpClaims:    make(map[string]struct{}),
 		rproxyPort:       rproxyPort,
 		logger:           logger,
 	}

@@ -185,8 +185,11 @@ func (ms *ManagementService) ScaleUp(functionName string, cold bool) error {
 		return fmt.Errorf("autoscaler not enabled")
 	}
 
-	// Measure scale-up time
+	recordScaleUp := ms.claimScaleUpRecord(functionName)
 	startTime := time.Now()
+	if recordScaleUp {
+		defer ms.releaseScaleUpRecord(functionName)
+	}
 
 	if err := ms.autoscaler.ScaleUpWhenReady(functionName); err != nil {
 		return err
@@ -194,8 +197,9 @@ func (ms *ManagementService) ScaleUp(functionName string, cold bool) error {
 
 	scaleUpDuration := time.Since(startTime)
 
-	// Record scale-up time to callgraph tracker via rproxy
-	ms.notifyScaleUp(functionName, startTime, scaleUpDuration, cold)
+	if recordScaleUp {
+		ms.notifyScaleUp(functionName, startTime, scaleUpDuration, cold)
+	}
 
 	ms.logger.Info("scale-up completed",
 		"function", functionName,
@@ -203,6 +207,27 @@ func (ms *ManagementService) ScaleUp(functionName string, cold bool) error {
 		"duration", scaleUpDuration)
 
 	return nil
+}
+
+func (ms *ManagementService) claimScaleUpRecord(functionName string) bool {
+	state, ok := ms.autoscaler.GetState(functionName)
+	if !ok || state != autoscaler.StateScaledDown {
+		return false
+	}
+
+	ms.mux.Lock()
+	defer ms.mux.Unlock()
+	if _, exists := ms.scaleUpClaims[functionName]; exists {
+		return false
+	}
+	ms.scaleUpClaims[functionName] = struct{}{}
+	return true
+}
+
+func (ms *ManagementService) releaseScaleUpRecord(functionName string) {
+	ms.mux.Lock()
+	delete(ms.scaleUpClaims, functionName)
+	ms.mux.Unlock()
 }
 
 // StartRequest marks a function as blocked while serving a request.

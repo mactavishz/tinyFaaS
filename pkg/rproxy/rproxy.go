@@ -513,15 +513,12 @@ func (r *RProxy) schedulePrewarm(caller string, target callgraph.PrewarmTarget) 
 	const safetyMargin = 50 * time.Millisecond
 	delay := target.LeadTime - coldStartTime - safetyMargin
 
-	// If delay is negative or zero, prewarm immediately
 	if delay <= 0 {
-		r.logger.Info("prewarming function immediately",
+		r.logger.Info("skipping prewarm - predicted too late",
 			"caller", caller,
 			"target", target.FunctionName,
 			"leadTime", target.LeadTime,
 			"coldStartTime", coldStartTime)
-
-		go r.executePrewarm(target.FunctionName)
 		return
 	}
 

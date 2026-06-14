@@ -103,6 +103,65 @@ func TestScaleUpFunctionReturnsError(t *testing.T) {
 	})
 }
 
+func TestSchedulePrewarmSkipsWhenPredictionCannotBeatColdStart(t *testing.T) {
+	recorder := newPathRecorder()
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+
+	tracker := callgraph.New(callgraph.WithLogger(nopLogger()))
+	tracker.Start()
+	defer tracker.Stop()
+	tracker.RecordScaleUp("test-func", time.Now(), 500*time.Millisecond, true)
+
+	r := New(nopLogger(), "development")
+	r.SetTracker(tracker)
+	r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
+	r.routingTableMux.Lock()
+	r.routingTable["test-func"] = &Route{
+		isActive:         false,
+		callgraphEnabled: true,
+	}
+	r.routingTableMux.Unlock()
+
+	r.schedulePrewarm("caller", callgraph.PrewarmTarget{
+		FunctionName: "test-func",
+		LeadTime:     500 * time.Millisecond,
+	})
+
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, 0, recorder.count("/system/scale-up"))
+}
+
+func TestSchedulePrewarmExecutesWhenDelayIsPositive(t *testing.T) {
+	recorder := newPathRecorder()
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+
+	tracker := callgraph.New(callgraph.WithLogger(nopLogger()))
+	tracker.Start()
+	defer tracker.Stop()
+	tracker.RecordScaleUp("test-func", time.Now(), 50*time.Millisecond, true)
+
+	r := New(nopLogger(), "development")
+	r.SetTracker(tracker)
+	r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
+	r.routingTableMux.Lock()
+	r.routingTable["test-func"] = &Route{
+		isActive:         false,
+		callgraphEnabled: true,
+	}
+	r.routingTableMux.Unlock()
+
+	r.schedulePrewarm("caller", callgraph.PrewarmTarget{
+		FunctionName: "test-func",
+		LeadTime:     200 * time.Millisecond,
+	})
+
+	require.Eventually(t, func() bool {
+		return recorder.count("/system/scale-up") == 1
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestCallReturns503WhenColdStartTriggerFails(t *testing.T) {
 	tracker := callgraph.New(callgraph.WithLogger(nopLogger()))
 	tracker.Start()
