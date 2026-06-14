@@ -103,7 +103,7 @@ func TestScaleUpFunctionReturnsError(t *testing.T) {
 	})
 }
 
-func TestSchedulePrewarmSkipsWhenPredictionCannotBeatColdStart(t *testing.T) {
+func TestSchedulePrewarmExecutesImmediatelyWhenDelayIsNonPositive(t *testing.T) {
 	recorder := newPathRecorder()
 	server := httptest.NewServer(recorder)
 	defer server.Close()
@@ -125,11 +125,12 @@ func TestSchedulePrewarmSkipsWhenPredictionCannotBeatColdStart(t *testing.T) {
 
 	r.schedulePrewarm("caller", callgraph.PrewarmTarget{
 		FunctionName: "test-func",
-		LeadTime:     500 * time.Millisecond,
+		LeadTime:     100 * time.Millisecond,
 	})
 
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, 0, recorder.count("/system/scale-up"))
+	require.Eventually(t, func() bool {
+		return recorder.count("/system/scale-up") == 1
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestSchedulePrewarmExecutesWhenDelayIsPositive(t *testing.T) {
