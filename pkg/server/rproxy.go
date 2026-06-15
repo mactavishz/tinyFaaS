@@ -414,7 +414,7 @@ func (r *InvocationRouter) invoke(name string, payload []byte, header http.Heade
 		defer finishRequest()
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := r.httpClient.Do(req)
 	if err != nil {
 		r.logger.Error("failed to invoke function", "err", err)
 		return http.StatusInternalServerError, nil

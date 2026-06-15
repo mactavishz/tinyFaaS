@@ -201,7 +201,7 @@ func (g *Gateway) functionExists(name string) (bool, error) {
 		return false, err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := g.httpClient.Do(req)
 	if err != nil {
 		return false, err
 	}

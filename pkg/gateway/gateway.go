@@ -9,8 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"log/slog"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -23,6 +24,7 @@ type Gateway struct {
 	mode         string
 	logger       *slog.Logger
 	stats        *functionStatsStore
+	httpClient   *http.Client
 }
 
 // Option is a functional option for configuring Gateway
@@ -47,6 +49,7 @@ func New(logger *slog.Logger, opts ...Option) *Gateway {
 		tinyfaasPort: defaultTinyFaaSPort,
 		logger:       logger,
 		stats:        NewFunctionStatsStore(),
+		httpClient:   newHTTPClient(),
 	}
 
 	for _, opt := range opts {
@@ -54,6 +57,19 @@ func New(logger *slog.Logger, opts ...Option) *Gateway {
 	}
 
 	return g
+}
+
+func newHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 60 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 50,
+			MaxConnsPerHost:     100,
+			IdleConnTimeout:     120 * time.Second,
+			DisableCompression:  true,
+		},
+	}
 }
 
 func (g *Gateway) IsDev() bool {
@@ -118,8 +134,7 @@ func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, targetAdd
 	)
 
 	// Send the request
-	client := &http.Client{}
-	resp, err := client.Do(proxyReq)
+	resp, err := g.httpClient.Do(proxyReq)
 	if err != nil {
 		http.Error(w, "Failed to proxy request", http.StatusBadGateway)
 		g.logger.Error("failed to proxy request", "err", err)

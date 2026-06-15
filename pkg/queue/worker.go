@@ -66,8 +66,25 @@ func NewWorker(config WorkerConfig, logger *slog.Logger) *Worker {
 
 	return &Worker{
 		config: config,
-		client: &http.Client{Timeout: 0},
+		client: newHTTPClient(config.MaxInflight),
 		logger: logger,
+	}
+}
+
+func newHTTPClient(maxInflight int) *http.Client {
+	maxConns := maxInflight * 2
+	if maxConns < 8 {
+		maxConns = 8
+	}
+	return &http.Client{
+		Timeout: 0,
+		Transport: &http.Transport{
+			MaxIdleConns:        maxConns,
+			MaxIdleConnsPerHost: maxConns,
+			MaxConnsPerHost:     maxConns,
+			IdleConnTimeout:     120 * time.Second,
+			DisableCompression:  true,
+		},
 	}
 }
 
