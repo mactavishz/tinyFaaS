@@ -38,12 +38,6 @@ bin-name:
 .PHONY: build
 build: tf-server-${OS}-${ARCH} tf-queue-worker-${OS}-${ARCH} tf-gateway-${OS}-${ARCH}
 
-.PHONY: build-manager
-build-manager: tf-server-${OS}-${ARCH}
-
-.PHONY: build-rproxy
-build-rproxy: tf-server-${OS}-${ARCH}
-
 .PHONY: build-server
 build-server: tf-server-${OS}-${ARCH}
 
