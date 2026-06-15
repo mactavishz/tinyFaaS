@@ -156,20 +156,18 @@ All endpoints below are exposed through gateway path prefix `/system`.
 | `/system/list` | `GET` | None | List functions as JSON. |
 | `/system/wipe` | `POST` | Empty body | Delete all functions. |
 | `/system/logs` | `GET` | Query optional: `?name=<fn>` | Function logs. |
-| `/system/scale-up` | `POST` | JSON: `name`, `cold` | Internal-only, localhost-restricted. |
-| `/system/heartbeat` | `POST` | JSON: `name` or `functions` array | Internal-only, localhost-restricted. |
 | `/system/callgraph` | `GET` | None | Development mode only. |
 | `/system/callgraph/function/{name}` | `GET` | None | Development mode only. |
 | `/system/callgraph/edge?callee=<fn>&caller=<fn>` | `GET` | None | Development mode only (`caller` is optional). |
 
 ## Cold Start Readiness Semantics
 
-- During scale-up, manager startup waits for container readiness checks to complete before the function is considered running.
+- During scale-up, the merged server waits for container readiness checks to complete before the function is considered running.
 - Readiness checks require each replica to have:
   - a valid container IP on the function network
   - `GET /health` returning `200 OK` on port `8000`
 - Replica readiness checks run concurrently, but route activation still requires **all configured replicas** to become ready.
-- RProxy records callgraph edges only after a function route is confirmed ready for invocation. Failed cold-start attempts that cannot route traffic do not create edge records.
+- The invocation router records callgraph edges only after a function route is confirmed ready for invocation. Failed cold-start attempts that cannot route traffic do not create edge records.
 
 ### `/system/upload` Metadata Schema
 
