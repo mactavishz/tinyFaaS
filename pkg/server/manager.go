@@ -1,8 +1,7 @@
-package manager
+package server
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -32,7 +31,6 @@ type ManagementService struct {
 	functionConfigs  map[string]FunctionConfig
 	scaleUpClaims    map[string]struct{}
 	mux              sync.Mutex
-	rproxyPort       string
 	autoscaler       *autoscaler.AutoScaler
 	logger           *slog.Logger
 	routeAddHook     func(name string, ips []string, labels map[string]string) error
@@ -59,7 +57,7 @@ type Handler interface {
 	GetLabels() map[string]string
 }
 
-func New(id string, rproxyPort string, tfBackend Backend, logger *slog.Logger) *ManagementService {
+func NewManagementService(id string, tfBackend Backend, logger *slog.Logger) *ManagementService {
 
 	ms := &ManagementService{
 		id:               id,
@@ -67,7 +65,6 @@ func New(id string, rproxyPort string, tfBackend Backend, logger *slog.Logger) *
 		functionHandlers: make(map[string]Handler),
 		functionConfigs:  make(map[string]FunctionConfig),
 		scaleUpClaims:    make(map[string]struct{}),
-		rproxyPort:       rproxyPort,
 		logger:           logger,
 	}
 
@@ -196,11 +193,11 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 
 	// If this is a redeployment, reset callgraph stats first before recording fresh cold start
 	if oldHandler != nil {
-		ms.logger.Info("notifying rproxy of callgraph reset for redeployment", "function", name)
+		ms.logger.Info("notifying callgraph tracker of reset for redeployment", "function", name)
 		ms.notifyCallgraphReset(name)
 	}
 
-	// Send scale-up data to rproxy for callgraph tracking, marked as cold start since this is a new function
+	// Record scale-up data for callgraph tracking, marked as cold start since this is a new function
 	ms.notifyScaleUp(name, coldStartTime, coldStartDuration, true)
 
 	config := FunctionConfig{
@@ -427,226 +424,44 @@ func (ms *ManagementService) notifyRouteAdd(name string, ips []string, labels ma
 	if ms.routeAddHook != nil {
 		return ms.routeAddHook(name, ips, labels)
 	}
+	return fmt.Errorf("route add hook not configured")
+}
 
-	d := struct {
-		FunctionName string            `json:"name"`
-		FunctionIPs  []string          `json:"ips"`
-		Labels       map[string]string `json:"labels,omitempty"`
-	}{
-		FunctionName: name,
-		FunctionIPs:  ips,
-		Labels:       labels,
+func (ms *ManagementService) notifyRouteUpdate(name string) error {
+	if ms.routeUpdateHook != nil {
+		return ms.routeUpdateHook(name)
 	}
-
-	b, err := json.Marshal(d)
-	if err != nil {
-		return err
-	}
-
-	ms.logger.Info("notify rproxy", "function", name, "ips", ips)
-	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%s/config", ms.rproxyPort), bytes.NewBuffer(b))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil && !errors.Is(err, io.EOF) {
-		ms.logger.Error("error notifying rproxy", "function", name, "err", err)
-		return err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	ms.logger.Info("rproxy response", "response", string(body))
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to notify rproxy, status code %d", resp.StatusCode)
-	}
-	return nil
+	return fmt.Errorf("route update hook not configured")
 }
 
 func (ms *ManagementService) notifyRouteDelete(name string) error {
 	if ms.routeDeleteHook != nil {
 		return ms.routeDeleteHook(name)
 	}
-
-	d := struct {
-		FunctionName string `json:"name"`
-	}{
-		FunctionName: name,
-	}
-
-	b, err := json.Marshal(d)
-	if err != nil {
-		return err
-	}
-
-	ms.logger.Info("notify rproxy", "function", name)
-	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://127.0.0.1:%s/config", ms.rproxyPort), bytes.NewBuffer(b))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	ms.logger.Info("rproxy response", "response", string(body))
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("rproxy returned status code %d", resp.StatusCode)
-	}
-	return nil
+	return fmt.Errorf("route delete hook not configured")
 }
 
-// notifyScaleUp sends scale-up or cold start data to rproxy for callgraph tracking
 func (ms *ManagementService) notifyScaleUp(name string, timestamp time.Time, duration time.Duration, cold bool) {
 	if ms.scaleUpHook != nil {
 		ms.scaleUpHook(name, timestamp, duration, cold)
-		return
-	}
-
-	data := struct {
-		FunctionName string `json:"name"`
-		Timestamp    int64  `json:"timestamp"`   // Unix nanoseconds
-		Duration     int64  `json:"duration_ns"` // Nanoseconds
-		Cold         bool   `json:"cold"`        // Whether this is a cold start
-	}{
-		FunctionName: name,
-		Timestamp:    timestamp.UnixNano(),
-		Duration:     duration.Nanoseconds(),
-		Cold:         cold, // Whether this is a cold start
-	}
-
-	body, err := json.Marshal(data)
-	if err != nil {
-		ms.logger.Error("failed to marshal scale-up data", "function", name, "err", err)
-		return
-	}
-
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s/callgraph/scaleup", ms.rproxyPort), bytes.NewBuffer(body))
-	if err != nil {
-		ms.logger.Error("failed to create scale-up request", "function", name, "cold", cold, "err", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		ms.logger.Error("failed to notify rproxy of scale-up", "function", name, "err", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		ms.logger.Warn("rproxy scale-up notification failed",
-			"function", name,
-			"statusCode", resp.StatusCode,
-			"cold", cold)
 	} else {
-		ms.logger.Debug("notified rproxy of scale-up",
-			"function", name,
-			"duration", duration,
-			"cold", cold)
+		ms.logger.Debug("scale-up callgraph hook not configured", "function", name)
 	}
 }
 
-// notifyScaleDown sends scale-down data to rproxy for callgraph tracking
 func (ms *ManagementService) notifyScaleDown(name string, timestamp time.Time, duration time.Duration) {
 	if ms.scaleDownHook != nil {
 		ms.scaleDownHook(name, timestamp, duration)
-		return
-	}
-
-	data := struct {
-		FunctionName string `json:"name"`
-		Timestamp    int64  `json:"timestamp"`   // Unix nanoseconds
-		Duration     int64  `json:"duration_ns"` // Nanoseconds
-	}{
-		FunctionName: name,
-		Timestamp:    timestamp.UnixNano(),
-		Duration:     duration.Nanoseconds(),
-	}
-
-	body, err := json.Marshal(data)
-	if err != nil {
-		ms.logger.Error("failed to marshal scale-down data", "function", name, "err", err)
-		return
-	}
-
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s/callgraph/scaledown", ms.rproxyPort), bytes.NewBuffer(body))
-	if err != nil {
-		ms.logger.Error("failed to create scale-down request", "function", name, "err", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		ms.logger.Error("failed to notify rproxy of scale-down", "function", name, "err", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		ms.logger.Warn("rproxy scale-down notification failed",
-			"function", name,
-			"statusCode", resp.StatusCode)
 	} else {
-		ms.logger.Debug("notified rproxy of scale-down",
-			"function", name,
-			"duration", duration)
+		ms.logger.Debug("scale-down callgraph hook not configured", "function", name)
 	}
 }
 
-// notifyCallgraphReset notifies rproxy to reset callgraph stats for a redeployed function
 func (ms *ManagementService) notifyCallgraphReset(name string) {
 	if ms.resetHook != nil {
 		ms.resetHook(name)
-		return
-	}
-
-	data := struct {
-		FunctionName string `json:"name"`
-	}{
-		FunctionName: name,
-	}
-
-	body, err := json.Marshal(data)
-	if err != nil {
-		ms.logger.Error("failed to marshal callgraph reset data", "function", name, "err", err)
-		return
-	}
-
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s/callgraph/reset", ms.rproxyPort), bytes.NewBuffer(body))
-	if err != nil {
-		ms.logger.Error("failed to create callgraph reset request", "function", name, "err", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		ms.logger.Error("failed to notify rproxy of callgraph reset", "function", name, "err", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		ms.logger.Warn("rproxy callgraph reset notification failed",
-			"function", name,
-			"statusCode", resp.StatusCode)
 	} else {
-		ms.logger.Info("notified rproxy of callgraph reset for redeployment",
-			"function", name)
+		ms.logger.Debug("callgraph reset hook not configured", "function", name)
 	}
 }
 

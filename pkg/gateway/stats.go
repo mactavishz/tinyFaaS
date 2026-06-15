@@ -196,7 +196,7 @@ func (g *Gateway) HandleFunctionStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) functionExists(name string) (bool, error) {
-	req, err := http.NewRequest(http.MethodGet, "http://"+g.managerAddr()+"/function/"+name, nil)
+	req, err := http.NewRequest(http.MethodGet, "http://"+g.tinyfaasAddr()+"/function/"+name, nil)
 	if err != nil {
 		return false, err
 	}

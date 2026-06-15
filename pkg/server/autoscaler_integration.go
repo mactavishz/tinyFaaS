@@ -1,12 +1,8 @@
-package manager
+package server
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"time"
 
 	"log/slog"
@@ -16,9 +12,8 @@ import (
 
 // TinyFaaSScaleOp implements the autoscaler.ScaleOperation interface for tinyFaaS
 type TinyFaaSScaleOp struct {
-	ms         *ManagementService
-	logger     *slog.Logger
-	httpClient *http.Client
+	ms     *ManagementService
+	logger *slog.Logger
 }
 
 // NewTinyFaaSScaleOp creates a new TinyFaaSScaleOp
@@ -26,9 +21,6 @@ func NewTinyFaaSScaleOp(ms *ManagementService, logger *slog.Logger) *TinyFaaSSca
 	return &TinyFaaSScaleOp{
 		ms:     ms,
 		logger: logger,
-		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
-		},
 	}
 }
 
@@ -44,9 +36,9 @@ func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 	}
 
 	ips := handler.IPs()
-	if err := op.notifyRProxyClearIPs(functionName); err != nil {
-		op.logger.Error("failed to notify rproxy about scale down", "function", functionName, "err", err)
-		return fmt.Errorf("failed to notify rproxy about scale down: %w", err)
+	if err := op.notifyRouteClearIPs(functionName); err != nil {
+		op.logger.Error("failed to clear route before scale down", "function", functionName, "err", err)
+		return fmt.Errorf("failed to clear route before scale down: %w", err)
 	}
 
 	// Measure scale-down time
@@ -54,13 +46,13 @@ func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 
 	// Stop the containers
 	if err := handler.Stop(); err != nil {
-		if restoreErr := op.notifyRProxyAdd(functionName, ips, config.Labels); restoreErr != nil {
-			op.logger.Error("failed to restore rproxy route after scale down failure",
+		if restoreErr := op.notifyRouteAdd(functionName, ips, config.Labels); restoreErr != nil {
+			op.logger.Error("failed to restore route after scale down failure",
 				"function", functionName,
 				"err", restoreErr)
 			return errors.Join(
 				fmt.Errorf("failed to stop function %s: %w", functionName, err),
-				fmt.Errorf("failed to restore rproxy route: %w", restoreErr),
+				fmt.Errorf("failed to restore route: %w", restoreErr),
 			)
 		}
 		return fmt.Errorf("failed to stop function %s: %w", functionName, err)
@@ -68,7 +60,6 @@ func (op *TinyFaaSScaleOp) ScaleDown(functionName string) error {
 
 	scaleDownDuration := time.Since(startTime)
 
-	// Record scale-down time to callgraph tracker via rproxy
 	op.ms.notifyScaleDown(functionName, startTime, scaleDownDuration)
 
 	op.logger.Info("function scaled down",
@@ -93,90 +84,21 @@ func (op *TinyFaaSScaleOp) ScaleUp(functionName string) error {
 		return fmt.Errorf("failed to restart function %s: %w", functionName, err)
 	}
 
-	// Notify rproxy to add function back to routing table
-	if err := op.notifyRProxyAdd(functionName, handler.IPs(), config.Labels); err != nil {
-		op.logger.Error("failed to notify rproxy", "function", functionName, "err", err)
-		return fmt.Errorf("function restarted but rproxy notification failed: %w", err)
+	if err := op.notifyRouteAdd(functionName, handler.IPs(), config.Labels); err != nil {
+		op.logger.Error("failed to restore route", "function", functionName, "err", err)
+		return fmt.Errorf("function restarted but route restore failed: %w", err)
 	}
 
 	op.logger.Info("function scaled up", "function", functionName)
 	return nil
 }
 
-// notifyRProxyAdd notifies rproxy to add a function to the routing table
-func (op *TinyFaaSScaleOp) notifyRProxyAdd(functionName string, ips []string, labels map[string]string) error {
-	if op.ms.routeAddHook != nil {
-		return op.ms.routeAddHook(functionName, ips, labels)
-	}
-
-	d := struct {
-		FunctionName string            `json:"name"`
-		FunctionIPs  []string          `json:"ips"`
-		Labels       map[string]string `json:"labels,omitempty"`
-	}{
-		FunctionName: functionName,
-		FunctionIPs:  ips,
-		Labels:       labels,
-	}
-
-	b, err := json.Marshal(d)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%s/config", op.ms.rproxyPort), bytes.NewBuffer(b))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := op.httpClient.Do(req)
-	if err != nil && (!errors.Is(err, io.EOF) || resp == nil) {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("rproxy returned status code %d", resp.StatusCode)
-	}
-
-	return nil
+func (op *TinyFaaSScaleOp) notifyRouteAdd(functionName string, ips []string, labels map[string]string) error {
+	return op.ms.notifyRouteAdd(functionName, ips, labels)
 }
 
-// notifyRProxyClearIPs notifies rproxy to remove a function's IPs from the routing table
-func (op *TinyFaaSScaleOp) notifyRProxyClearIPs(functionName string) error {
-	if op.ms.routeUpdateHook != nil {
-		return op.ms.routeUpdateHook(functionName)
-	}
-
-	d := struct {
-		FunctionName string `json:"name"`
-	}{
-		FunctionName: functionName,
-	}
-
-	b, err := json.Marshal(d)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("http://127.0.0.1:%s/config", op.ms.rproxyPort), bytes.NewBuffer(b))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := op.httpClient.Do(req)
-	if err != nil && (!errors.Is(err, io.EOF) || resp == nil) {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("rproxy returned status code %d", resp.StatusCode)
-	}
-
-	return nil
+func (op *TinyFaaSScaleOp) notifyRouteClearIPs(functionName string) error {
+	return op.ms.notifyRouteUpdate(functionName)
 }
 
 // SetAutoScaler sets the autoscaler for the management service
@@ -189,7 +111,7 @@ func (ms *ManagementService) GetAutoScaler() *autoscaler.AutoScaler {
 	return ms.autoscaler
 }
 
-// ScaleUp scales up a function and records the scale-up time to callgraph tracker via rproxy
+// ScaleUp scales up a function and records the scale-up time to the local callgraph tracker.
 // cold=true means this is a user-facing cold start
 // cold=false means this is a proactive prewarm
 func (ms *ManagementService) ScaleUp(functionName string, cold bool) error {

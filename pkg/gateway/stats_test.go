@@ -76,7 +76,7 @@ func TestHandleFunctionStats(t *testing.T) {
 		t.Fatalf("split host port failed: %v", err)
 	}
 
-	g := New(nopLogger(), WithManagerPort(port))
+	g := New(nopLogger(), WithTinyFaaSPort(port))
 	g.stats.Record("echo", InvocationRecord{StatusCode: 200, Success: true, Method: http.MethodPost, Path: "/fn/echo"})
 
 	req := httptest.NewRequest(http.MethodGet, "/system/stats/function/echo", nil)

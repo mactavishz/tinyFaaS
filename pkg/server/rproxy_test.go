@@ -1,14 +1,10 @@
-package rproxy
+package server
 
 import (
 	"context"
 	"fmt"
-	"io"
-	"log/slog"
 	"net"
 	"net/http"
-	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,10 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func nopLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 type pathRecorder struct {
 	mu     sync.Mutex
@@ -79,43 +71,40 @@ func startFunctionRuntimeServer(t *testing.T) func() {
 }
 
 func TestScaleUpFunctionReturnsError(t *testing.T) {
-	t.Run("connection refused", func(t *testing.T) {
-		r := New(nopLogger(), "development")
-		r.SetGatewayAddr("127.0.0.1:1")
+	t.Run("missing hook", func(t *testing.T) {
+		r := NewInvocationRouter(nopLogger(), "development")
 
 		err := r.scaleUpFunction("test-func", true)
 		require.Error(t, err)
+		assert.Contains(t, err.Error(), "scale-up hook not configured")
 	})
 
-	t.Run("non-200 response", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			assert.Equal(t, "/system/scale-up", req.URL.Path)
-			w.WriteHeader(http.StatusInternalServerError)
-		}))
-		defer server.Close()
-
-		r := New(nopLogger(), "development")
-		r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
+	t.Run("hook error", func(t *testing.T) {
+		r := NewInvocationRouter(nopLogger(), "development")
+		r.SetScaleUpHook(func(name string, cold bool) error {
+			return fmt.Errorf("scale-up failed")
+		})
 
 		err := r.scaleUpFunction("test-func", true)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "scale-up returned status")
+		assert.Contains(t, err.Error(), "scale-up failed")
 	})
 }
 
 func TestSchedulePrewarmExecutesImmediatelyWhenDelayIsNonPositive(t *testing.T) {
 	recorder := newPathRecorder()
-	server := httptest.NewServer(recorder)
-	defer server.Close()
 
 	tracker := callgraph.New(callgraph.WithLogger(nopLogger()))
 	tracker.Start()
 	defer tracker.Stop()
 	tracker.RecordScaleUp("test-func", time.Now(), 500*time.Millisecond, true)
 
-	r := New(nopLogger(), "development")
+	r := NewInvocationRouter(nopLogger(), "development")
 	r.SetTracker(tracker)
-	r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		recorder.record("scale-up-hook")
+		return nil
+	})
 	r.routingTableMux.Lock()
 	r.routingTable["test-func"] = &Route{
 		isActive:         false,
@@ -129,23 +118,24 @@ func TestSchedulePrewarmExecutesImmediatelyWhenDelayIsNonPositive(t *testing.T) 
 	})
 
 	require.Eventually(t, func() bool {
-		return recorder.count("/system/scale-up") == 1
+		return recorder.count("scale-up-hook") == 1
 	}, time.Second, 10*time.Millisecond)
 }
 
 func TestSchedulePrewarmExecutesWhenDelayIsPositive(t *testing.T) {
 	recorder := newPathRecorder()
-	server := httptest.NewServer(recorder)
-	defer server.Close()
 
 	tracker := callgraph.New(callgraph.WithLogger(nopLogger()))
 	tracker.Start()
 	defer tracker.Stop()
 	tracker.RecordScaleUp("test-func", time.Now(), 50*time.Millisecond, true)
 
-	r := New(nopLogger(), "development")
+	r := NewInvocationRouter(nopLogger(), "development")
 	r.SetTracker(tracker)
-	r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		recorder.record("scale-up-hook")
+		return nil
+	})
 	r.routingTableMux.Lock()
 	r.routingTable["test-func"] = &Route{
 		isActive:         false,
@@ -159,7 +149,7 @@ func TestSchedulePrewarmExecutesWhenDelayIsPositive(t *testing.T) {
 	})
 
 	require.Eventually(t, func() bool {
-		return recorder.count("/system/scale-up") == 1
+		return recorder.count("scale-up-hook") == 1
 	}, time.Second, 10*time.Millisecond)
 }
 
@@ -168,10 +158,12 @@ func TestCallReturns503WhenColdStartTriggerFails(t *testing.T) {
 	tracker.Start()
 	defer tracker.Stop()
 
-	r := New(nopLogger(), "development")
+	r := NewInvocationRouter(nopLogger(), "development")
 	r.SetTracker(tracker)
 	r.SetAutoScalerEnabled(true)
-	r.SetGatewayAddr("127.0.0.1:1")
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		return fmt.Errorf("scale-up failed")
+	})
 
 	r.routingTableMux.Lock()
 	r.routingTable["test-func"] = &Route{
@@ -191,7 +183,7 @@ func TestCallWaitsForRouteReadyAfterScaleUp(t *testing.T) {
 	stopRuntime := startFunctionRuntimeServer(t)
 	defer stopRuntime()
 
-	r := New(nopLogger(), "development")
+	r := NewInvocationRouter(nopLogger(), "development")
 	r.SetAutoScalerEnabled(true)
 
 	r.routingTableMux.Lock()
@@ -200,15 +192,7 @@ func TestCallWaitsForRouteReadyAfterScaleUp(t *testing.T) {
 	}
 	r.routingTableMux.Unlock()
 
-	scaleUpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path != "/system/scale-up" && req.URL.Path != "/system/request-start" && req.URL.Path != "/system/request-finish" {
-			t.Fatalf("unexpected path: %s", req.URL.Path)
-		}
-		if req.URL.Path != "/system/scale-up" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
+	r.SetScaleUpHook(func(name string, cold bool) error {
 		go func() {
 			time.Sleep(100 * time.Millisecond)
 			r.routingTableMux.Lock()
@@ -218,12 +202,9 @@ func TestCallWaitsForRouteReadyAfterScaleUp(t *testing.T) {
 			}
 			r.routingTableMux.Unlock()
 		}()
-
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer scaleUpServer.Close()
-
-	r.SetGatewayAddr(strings.TrimPrefix(scaleUpServer.URL, "http://"))
+		return nil
+	})
+	r.SetRequestHooks(func(name string) error { return nil }, func(name string) {})
 
 	status, body := r.Call("test-func", []byte("{}"), false, http.Header{"X-Call-Id": []string{"req-route-sync"}})
 	assert.Equal(t, http.StatusOK, status)
@@ -232,12 +213,15 @@ func TestCallWaitsForRouteReadyAfterScaleUp(t *testing.T) {
 
 func TestCallFinishesRequestAfterLocalRequestBuildFailure(t *testing.T) {
 	recorder := newPathRecorder()
-	server := httptest.NewServer(recorder)
-	defer server.Close()
 
-	r := New(nopLogger(), "development")
+	r := NewInvocationRouter(nopLogger(), "development")
 	r.SetAutoScalerEnabled(true)
-	r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
+	r.SetRequestHooks(func(name string) error {
+		recorder.record("request-start-hook")
+		return nil
+	}, func(name string) {
+		recorder.record("request-finish-hook")
+	})
 
 	r.routingTableMux.Lock()
 	r.routingTable["test-func"] = &Route{
@@ -249,8 +233,8 @@ func TestCallFinishesRequestAfterLocalRequestBuildFailure(t *testing.T) {
 	status, body := r.Call("test-func", []byte("{}"), false, http.Header{"X-Call-Id": []string{"req-build-fail"}})
 	assert.Equal(t, http.StatusInternalServerError, status)
 	assert.Nil(t, body)
-	assert.Equal(t, 1, recorder.count("/system/request-start"))
-	assert.Equal(t, 1, recorder.count("/system/request-finish"))
+	assert.Equal(t, 1, recorder.count("request-start-hook"))
+	assert.Equal(t, 1, recorder.count("request-finish-hook"))
 }
 
 func TestCallLegacyAsyncFlagInvokesSynchronously(t *testing.T) {
@@ -258,12 +242,15 @@ func TestCallLegacyAsyncFlagInvokesSynchronously(t *testing.T) {
 	defer stopRuntime()
 
 	recorder := newPathRecorder()
-	server := httptest.NewServer(recorder)
-	defer server.Close()
 
-	r := New(nopLogger(), "development")
+	r := NewInvocationRouter(nopLogger(), "development")
 	r.SetAutoScalerEnabled(true)
-	r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
+	r.SetRequestHooks(func(name string) error {
+		recorder.record("request-start-hook")
+		return nil
+	}, func(name string) {
+		recorder.record("request-finish-hook")
+	})
 
 	r.routingTableMux.Lock()
 	r.routingTable["test-func"] = &Route{
@@ -275,30 +262,22 @@ func TestCallLegacyAsyncFlagInvokesSynchronously(t *testing.T) {
 	status, body := r.Call("test-func", []byte("{}"), true, http.Header{"X-Call-Id": []string{"req-async"}})
 	assert.Equal(t, http.StatusOK, status)
 	assert.Equal(t, []byte("ok"), body)
-	assert.Equal(t, 1, recorder.count("/system/request-start"))
-	assert.Equal(t, 1, recorder.count("/system/request-finish"))
+	assert.Equal(t, 1, recorder.count("request-start-hook"))
+	assert.Equal(t, 1, recorder.count("request-finish-hook"))
 }
 
 func TestCallLegacyAsyncFlagWaitsForColdStart(t *testing.T) {
 	stopRuntime := startFunctionRuntimeServer(t)
 	defer stopRuntime()
 
-	r := New(nopLogger(), "development")
+	r := NewInvocationRouter(nopLogger(), "development")
 	r.SetAutoScalerEnabled(true)
 
 	recorder := newPathRecorder()
 	scaleUpStarted := make(chan struct{})
 	scaleUpReleased := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		recorder.record(req.URL.Path)
-		if req.URL.Path != "/system/scale-up" && req.URL.Path != "/system/request-start" && req.URL.Path != "/system/request-finish" {
-			t.Fatalf("unexpected path: %s", req.URL.Path)
-		}
-		if req.URL.Path != "/system/scale-up" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		recorder.record("scale-up-hook")
 		close(scaleUpStarted)
 		time.Sleep(200 * time.Millisecond)
 		routingReady := func() {
@@ -311,11 +290,14 @@ func TestCallLegacyAsyncFlagWaitsForColdStart(t *testing.T) {
 		}
 		routingReady()
 		close(scaleUpReleased)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
+		return nil
+	})
+	r.SetRequestHooks(func(name string) error {
+		recorder.record("request-start-hook")
+		return nil
+	}, func(name string) {
+		recorder.record("request-finish-hook")
+	})
 
 	r.routingTableMux.Lock()
 	r.routingTable["test-func"] = &Route{
@@ -348,27 +330,34 @@ func TestCallLegacyAsyncFlagWaitsForColdStart(t *testing.T) {
 		}
 	}, time.Second, 10*time.Millisecond)
 	require.Eventually(t, func() bool {
-		return recorder.count("/system/request-start") == 1 && recorder.count("/system/request-finish") == 1
+		return recorder.count("request-start-hook") == 1 && recorder.count("request-finish-hook") == 1
 	}, time.Second, 10*time.Millisecond)
 }
 
 func TestCallAsyncReturns404ForUnknownFunction(t *testing.T) {
 	recorder := newPathRecorder()
-	server := httptest.NewServer(recorder)
-	defer server.Close()
 
-	r := New(nopLogger(), "development")
+	r := NewInvocationRouter(nopLogger(), "development")
 	r.SetAutoScalerEnabled(true)
-	r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		recorder.record("scale-up-hook")
+		return nil
+	})
+	r.SetRequestHooks(func(name string) error {
+		recorder.record("request-start-hook")
+		return nil
+	}, func(name string) {
+		recorder.record("request-finish-hook")
+	})
 
 	status, body := r.Call("missing-func", []byte("{}"), true, http.Header{"X-Call-Id": []string{"req-async-missing"}})
 	assert.Equal(t, http.StatusNotFound, status)
 	assert.Nil(t, body)
 
 	time.Sleep(50 * time.Millisecond)
-	assert.Equal(t, 0, recorder.count("/system/scale-up"))
-	assert.Equal(t, 0, recorder.count("/system/request-start"))
-	assert.Equal(t, 0, recorder.count("/system/request-finish"))
+	assert.Equal(t, 0, recorder.count("scale-up-hook"))
+	assert.Equal(t, 0, recorder.count("request-start-hook"))
+	assert.Equal(t, 0, recorder.count("request-finish-hook"))
 }
 
 func TestCallRecordsEdgeWhenRouteReady(t *testing.T) {
@@ -379,7 +368,7 @@ func TestCallRecordsEdgeWhenRouteReady(t *testing.T) {
 	tracker.Start()
 	defer tracker.Stop()
 
-	r := New(nopLogger(), "development")
+	r := NewInvocationRouter(nopLogger(), "development")
 	r.SetTracker(tracker)
 
 	r.routingTableMux.Lock()
@@ -400,7 +389,7 @@ func TestCallRecordsEdgeWhenRouteReady(t *testing.T) {
 }
 
 func TestUpdateDeactivatesRouteIdempotently(t *testing.T) {
-	r := New(nopLogger(), "development")
+	r := NewInvocationRouter(nopLogger(), "development")
 
 	err := r.Add("test-func", []string{"10.0.0.2", "10.0.0.3"}, map[string]string{})
 	require.NoError(t, err)
@@ -435,19 +424,16 @@ func TestUpdateDeactivatesRouteIdempotently(t *testing.T) {
 	assert.Empty(t, route.ips)
 }
 
-func TestSendBatchHeartbeatUsesConfiguredGatewayAddr(t *testing.T) {
+func TestSendBatchHeartbeatUsesConfiguredHook(t *testing.T) {
 	called := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	r := NewInvocationRouter(nopLogger(), "development")
+	r.SetHeartbeatHooks(nil, func(names []string) error {
 		called = true
-		assert.Equal(t, "/system/heartbeat", req.URL.Path)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	r := New(nopLogger(), "development")
-	r.SetGatewayAddr(strings.TrimPrefix(server.URL, "http://"))
+		assert.Equal(t, []string{"test-func"}, names)
+		return nil
+	})
 
 	err := r.sendBatchHeartbeat([]string{"test-func"})
 	require.NoError(t, err)
-	assert.True(t, called, fmt.Sprintf("expected heartbeat endpoint to be called via %s", r.gatewayAddr))
+	assert.True(t, called, "expected heartbeat hook to be called")
 }

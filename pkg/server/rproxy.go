@@ -1,8 +1,7 @@
-package rproxy
+package server
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -14,7 +13,6 @@ import (
 
 	"log/slog"
 
-	retry "github.com/avast/retry-go/v5"
 	"github.com/google/uuid"
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/callgraph"
 )
@@ -25,7 +23,7 @@ type Route struct {
 	callgraphEnabled bool
 }
 
-type RProxy struct {
+type InvocationRouter struct {
 	routingTable        map[string]*Route
 	reverseRoutingTable map[string]string
 	mode                string
@@ -33,18 +31,12 @@ type RProxy struct {
 	autoscalerEnabled   bool
 	tracker             callgraph.FullTracker
 	logger              *slog.Logger
-	// gatewayAddr is the host:port of the gateway used for heartbeat and scale-up requests
-	gatewayAddr  string
-	heatbeatAddr string
-	scaleUpAddr  string
-	// Shared HTTP client for internal requests (heartbeat, scale-up)
+	// Shared HTTP client for function invocation requests
 	// Configured with connection pooling for efficient local communication
-	httpClient        *http.Client
-	requestStartAddr  string
-	requestFinishAddr string
+	httpClient *http.Client
 	// Heartbeat worker: single goroutine sends batch heartbeats periodically
 	// Functions are added to pendingHeartbeats when invoked, and the worker
-	// flushes them to the manager at heartbeatInterval
+	// flushes them through the configured heartbeat hook at heartbeatInterval
 	heartbeatInterval time.Duration
 	pendingHeartbeats map[string]struct{}
 	heartbeatMux      sync.Mutex
@@ -72,7 +64,7 @@ func (r *Route) PickIP() (string, error) {
 const (
 	defaultHeartbeatInterval = 2 * time.Second
 
-	// After manager accepts a scale-up request, rproxy may still need a brief window
+	// After the scale-up hook returns, the invocation router may still need a brief window
 	// for route/IP state to be visible locally before invocation can proceed.
 	scaleUpRouteReadyTimeout  = 500 * time.Millisecond
 	scaleUpRouteReadyInterval = 25 * time.Millisecond
@@ -98,8 +90,8 @@ func newHTTPClient() *http.Client {
 	}
 }
 
-func New(logger *slog.Logger, mode string) *RProxy {
-	return &RProxy{
+func NewInvocationRouter(logger *slog.Logger, mode string) *InvocationRouter {
+	return &InvocationRouter{
 		routingTable:        make(map[string]*Route),
 		reverseRoutingTable: make(map[string]string),
 		mode:                mode,
@@ -112,49 +104,38 @@ func New(logger *slog.Logger, mode string) *RProxy {
 	}
 }
 
-func (r *RProxy) IsDev() bool {
+func (r *InvocationRouter) IsDev() bool {
 	return strings.ToLower(r.mode) == "development"
 }
 
-func (r *RProxy) IsProd() bool {
+func (r *InvocationRouter) IsProd() bool {
 	return strings.ToLower(r.mode) == "production"
 }
 
-func (r *RProxy) SetTracker(tracker callgraph.FullTracker) {
+func (r *InvocationRouter) SetTracker(tracker callgraph.FullTracker) {
 	r.tracker = tracker
 }
 
-func (r *RProxy) SetAutoScalerEnabled(enabled bool) {
+func (r *InvocationRouter) SetAutoScalerEnabled(enabled bool) {
 	r.autoscalerEnabled = enabled
 }
 
-func (r *RProxy) SetGatewayAddr(addr string) {
-	r.gatewayAddr = addr
-	r.heatbeatAddr = fmt.Sprintf("http://%s/system/heartbeat", addr)
-	r.scaleUpAddr = fmt.Sprintf("http://%s/system/scale-up", addr)
-	r.requestStartAddr = fmt.Sprintf("http://%s/system/request-start", addr)
-	r.requestFinishAddr = fmt.Sprintf("http://%s/system/request-finish", addr)
-	r.logger.Debug("gateway url set", "url", r.gatewayAddr)
-	r.logger.Debug("heartbeat url set", "url", r.heatbeatAddr)
-	r.logger.Debug("scale-up url set", "url", r.scaleUpAddr)
-}
-
-func (r *RProxy) SetScaleUpHook(hook func(name string, cold bool) error) {
+func (r *InvocationRouter) SetScaleUpHook(hook func(name string, cold bool) error) {
 	r.scaleUpHook = hook
 }
 
-func (r *RProxy) SetRequestHooks(start func(name string) error, finish func(name string)) {
+func (r *InvocationRouter) SetRequestHooks(start func(name string) error, finish func(name string)) {
 	r.requestStartHook = start
 	r.requestFinishHook = finish
 }
 
-func (r *RProxy) SetHeartbeatHooks(single func(name string) error, batch func(names []string) error) {
+func (r *InvocationRouter) SetHeartbeatHooks(single func(name string) error, batch func(names []string) error) {
 	r.heartbeatHook = single
 	r.heartbeatBatchHook = batch
 }
 
 // CallgraphEnabled returns whether callgraph tracking is enabled for a given function,
-func (r *RProxy) CallgraphEnabled(functionName string) bool {
+func (r *InvocationRouter) CallgraphEnabled(functionName string) bool {
 	if r.tracker == nil || !r.tracker.Enabled() {
 		return false
 	}
@@ -172,7 +153,7 @@ func (r *RProxy) CallgraphEnabled(functionName string) bool {
 	return route.callgraphEnabled
 }
 
-func (r *RProxy) Add(name string, ips []string, labels map[string]string) error {
+func (r *InvocationRouter) Add(name string, ips []string, labels map[string]string) error {
 	if len(ips) == 0 {
 		return fmt.Errorf("no ips given")
 	}
@@ -194,7 +175,7 @@ func (r *RProxy) Add(name string, ips []string, labels map[string]string) error 
 	return nil
 }
 
-func (r *RProxy) Del(name string) error {
+func (r *InvocationRouter) Del(name string) error {
 	r.routingTableMux.Lock()
 	defer r.routingTableMux.Unlock()
 
@@ -221,7 +202,7 @@ func (r *RProxy) Del(name string) error {
 	return nil
 }
 
-func (r *RProxy) Update(name string) error {
+func (r *InvocationRouter) Update(name string) error {
 	r.routingTableMux.Lock()
 	defer r.routingTableMux.Unlock()
 
@@ -255,7 +236,7 @@ func copyRoute(route *Route) *Route {
 	}
 }
 
-func (r *RProxy) getRouteSnapshot(name string) (*Route, bool) {
+func (r *InvocationRouter) getRouteSnapshot(name string) (*Route, bool) {
 	r.routingTableMux.RLock()
 	defer r.routingTableMux.RUnlock()
 
@@ -267,7 +248,7 @@ func (r *RProxy) getRouteSnapshot(name string) (*Route, bool) {
 	return copyRoute(route), true
 }
 
-func (r *RProxy) waitForRouteReady(name string, timeout time.Duration) (*Route, bool) {
+func (r *InvocationRouter) waitForRouteReady(name string, timeout time.Duration) (*Route, bool) {
 	deadline := time.Now().Add(timeout)
 	for {
 		route, exists := r.getRouteSnapshot(name)
@@ -287,16 +268,16 @@ func (r *RProxy) waitForRouteReady(name string, timeout time.Duration) (*Route, 
 	}
 }
 
-func (r *RProxy) Call(name string, payload []byte, async bool, header http.Header) (int, []byte) {
+func (r *InvocationRouter) Call(name string, payload []byte, async bool, header http.Header) (int, []byte) {
 	startTime := time.Now()
 	if async {
-		r.logger.Warn("legacy rproxy async flag ignored; use /async-fn endpoint", "name", name)
+		r.logger.Warn("legacy async flag ignored; use /async-fn endpoint", "name", name)
 	}
 
 	return r.invoke(name, payload, header, startTime)
 }
 
-func (r *RProxy) invoke(name string, payload []byte, header http.Header, startTime time.Time) (int, []byte) {
+func (r *InvocationRouter) invoke(name string, payload []byte, header http.Header, startTime time.Time) (int, []byte) {
 	if header == nil {
 		header = http.Header{}
 	}
@@ -455,7 +436,7 @@ func (r *RProxy) invoke(name string, payload []byte, header http.Header, startTi
 	return resp.StatusCode, res_body
 }
 
-func (r *RProxy) GetFunctionNameByIP(ip string) (string, bool) {
+func (r *InvocationRouter) GetFunctionNameByIP(ip string) (string, bool) {
 	r.routingTableMux.RLock()
 	defer r.routingTableMux.RUnlock()
 	name, ok := r.reverseRoutingTable[ip]
@@ -463,13 +444,13 @@ func (r *RProxy) GetFunctionNameByIP(ip string) (string, bool) {
 }
 
 // GetTracker returns the callgraph tracker
-func (r *RProxy) GetTracker() callgraph.Tracker {
+func (r *InvocationRouter) GetTracker() callgraph.Tracker {
 	return r.tracker
 }
 
 // prewarmDownstream triggers prewarming for downstream functions based on call graph analysis.
 // This function should be called asynchronously (fire-and-forget) to avoid adding latency to the request.
-func (r *RProxy) prewarmDownstream(functionName string) {
+func (r *InvocationRouter) prewarmDownstream(functionName string) {
 	targets := r.tracker.GetPrewarmTargets(functionName)
 	if len(targets) == 0 {
 		return
@@ -487,7 +468,7 @@ func (r *RProxy) prewarmDownstream(functionName string) {
 // schedulePrewarm schedules a prewarm operation for a target function.
 // It calculates the delay based on lead time and cold start estimates,
 // ensuring the function is ready just in time for when it's needed.
-func (r *RProxy) schedulePrewarm(caller string, target callgraph.PrewarmTarget) {
+func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.PrewarmTarget) {
 	// Respect per-function callgraph enablement: if target is disabled, skip prewarming it.
 	if !r.CallgraphEnabled(target.FunctionName) {
 		return
@@ -554,7 +535,7 @@ func (r *RProxy) schedulePrewarm(caller string, target callgraph.PrewarmTarget) 
 }
 
 // executePrewarm performs the actual prewarm operation for a function.
-func (r *RProxy) executePrewarm(funcName string) {
+func (r *InvocationRouter) executePrewarm(funcName string) {
 	if err := r.scaleUpFunction(funcName, false); err != nil {
 		r.logger.Debug("prewarm downstream function failed",
 			"function", funcName,
@@ -568,7 +549,7 @@ func (r *RProxy) executePrewarm(funcName string) {
 // queueHeartbeat adds a function to the pending heartbeat set.
 // The heartbeat worker will batch-send heartbeats for all pending functions.
 // This is a non-blocking operation that avoids spawning goroutines per-call.
-func (r *RProxy) queueHeartbeat(name string) {
+func (r *InvocationRouter) queueHeartbeat(name string) {
 	if name == "" {
 		return
 	}
@@ -578,20 +559,20 @@ func (r *RProxy) queueHeartbeat(name string) {
 }
 
 // StartHeartbeatWorker starts the background goroutine that sends batch heartbeats.
-// This should be called once when the rproxy starts.
-func (r *RProxy) StartHeartbeatWorker() {
+// This should be called once when the invocation router starts.
+func (r *InvocationRouter) StartHeartbeatWorker() {
 	go r.heartbeatWorker()
 }
 
 // StopHeartbeatWorker stops the heartbeat worker gracefully.
 // This should be called during shutdown.
-func (r *RProxy) StopHeartbeatWorker() {
+func (r *InvocationRouter) StopHeartbeatWorker() {
 	close(r.heartbeatStopChan)
 	<-r.heartbeatDoneChan
 }
 
 // heartbeatWorker is the background goroutine that periodically sends batch heartbeats.
-func (r *RProxy) heartbeatWorker() {
+func (r *InvocationRouter) heartbeatWorker() {
 	defer close(r.heartbeatDoneChan)
 
 	ticker := time.NewTicker(r.heartbeatInterval)
@@ -610,7 +591,7 @@ func (r *RProxy) heartbeatWorker() {
 }
 
 // flushHeartbeats collects all pending heartbeats and sends them in a single batch request.
-func (r *RProxy) flushHeartbeats() {
+func (r *InvocationRouter) flushHeartbeats() {
 	// Collect and clear pending heartbeats atomically
 	r.heartbeatMux.Lock()
 	if len(r.pendingHeartbeats) == 0 {
@@ -637,177 +618,33 @@ func (r *RProxy) flushHeartbeats() {
 	}
 }
 
-// sendBatchHeartbeat sends a batch heartbeat request to the manager.
-func (r *RProxy) sendBatchHeartbeat(functions []string) error {
+func (r *InvocationRouter) sendBatchHeartbeat(functions []string) error {
 	if r.heartbeatBatchHook != nil {
 		return r.heartbeatBatchHook(functions)
 	}
-
-	reqData := struct {
-		Functions []string `json:"functions"`
-	}{
-		Functions: functions,
-	}
-
-	body, err := json.Marshal(reqData)
-	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	err = retry.New(
-		retry.Attempts(3),
-		retry.Delay(100*time.Millisecond),
-		retry.OnRetry(func(attempt uint, err error) {
-			r.logger.Debug("batch heartbeat attempt failed", "attempt", attempt, "functions", functions, "err", err)
-		}),
-	).Do(
-		func() error {
-			req, err := http.NewRequest(http.MethodPost, r.heatbeatAddr, bytes.NewBuffer(body))
-			if err != nil {
-				return fmt.Errorf("failed to create request: %w", err)
-			}
-			req.Header.Set("Content-Type", "application/json")
-
-			resp, err := r.httpClient.Do(req)
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("batch heartbeat returned status %d", resp.StatusCode)
-			}
-
-			r.logger.Debug("successfully sent batch heartbeat", "count", len(functions))
-			return nil
-		},
-	)
-
-	return err
+	return fmt.Errorf("heartbeat batch hook not configured")
 }
 
-// scaleUpFunction calls the manager to scale up a function
 // cold=true means this is a user-facing cold start
 // cold=false means this is a proactive prewarm
-func (r *RProxy) scaleUpFunction(name string, cold bool) error {
+func (r *InvocationRouter) scaleUpFunction(name string, cold bool) error {
 	if r.scaleUpHook != nil {
 		return r.scaleUpHook(name, cold)
 	}
-
-	reqData := struct {
-		FunctionName string `json:"name"`
-		Cold         bool   `json:"cold"`
-	}{
-		FunctionName: name,
-		Cold:         cold,
-	}
-
-	body, err := json.Marshal(reqData)
-	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	err = retry.New(
-		retry.Attempts(5),
-		retry.Delay(100*time.Millisecond),
-		retry.OnRetry(func(attempt uint, err error) {
-			r.logger.Debug("scale-up attempt failed", "attempt", attempt, "name", name, "cold", cold, "err", err)
-		}),
-	).Do(
-		func() error {
-			req, err := http.NewRequest(http.MethodPost, r.scaleUpAddr, bytes.NewBuffer(body))
-			if err != nil {
-				return fmt.Errorf("failed to create request: %w", err)
-			}
-			req.Header.Set("Content-Type", "application/json")
-
-			resp, err := r.httpClient.Do(req)
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("scale-up returned status %d", resp.StatusCode)
-			}
-
-			r.logger.Info("successfully scaled up the function", "name", name, "cold", cold)
-			return nil
-		},
-	)
-	if err != nil {
-		r.logger.Error("failed to scale up the function", "name", name, "cold", cold, "err", err)
-		return err
-	}
-
-	return nil
+	return fmt.Errorf("scale-up hook not configured")
 }
 
-func (r *RProxy) notifyRequestStart(name string) error {
+func (r *InvocationRouter) notifyRequestStart(name string) error {
 	if r.requestStartHook != nil {
 		return r.requestStartHook(name)
 	}
-
-	reqData := struct {
-		FunctionName string `json:"name"`
-	}{
-		FunctionName: name,
-	}
-
-	body, err := json.Marshal(reqData)
-	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, r.requestStartAddr, bytes.NewBuffer(body))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("request-start returned status %d", resp.StatusCode)
-	}
-	return nil
+	return fmt.Errorf("request-start hook not configured")
 }
 
-func (r *RProxy) notifyRequestFinish(name string) error {
+func (r *InvocationRouter) notifyRequestFinish(name string) error {
 	if r.requestFinishHook != nil {
 		r.requestFinishHook(name)
 		return nil
-	}
-
-	reqData := struct {
-		FunctionName string `json:"name"`
-	}{
-		FunctionName: name,
-	}
-
-	body, err := json.Marshal(reqData)
-	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, r.requestFinishAddr, bytes.NewBuffer(body))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("request-finish returned status %d", resp.StatusCode)
 	}
 	return nil
 }

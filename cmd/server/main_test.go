@@ -12,14 +12,14 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
 	"github.com/OpenFogStack/tinyFaaS/pkg/queue"
+	tinyserver "github.com/OpenFogStack/tinyFaaS/pkg/server"
 	invstats "github.com/OpenFogStack/tinyFaaS/pkg/stats"
 )
 
 type serverTestBackend struct{}
 
-func (b serverTestBackend) Create(name string, env string, threads int, filedir string, envs map[string]string, labels map[string]string, limits manager.ResourceLimits) (manager.Handler, error) {
+func (b serverTestBackend) Create(name string, env string, threads int, filedir string, envs map[string]string, labels map[string]string, limits tinyserver.ResourceLimits) (tinyserver.Handler, error) {
 	return &serverTestHandler{}, nil
 }
 
@@ -62,16 +62,16 @@ func (p *recordingPublisher) Close() error { return nil }
 
 func newAsyncTestService(t *testing.T, publisher queue.Publisher) *service {
 	t.Helper()
-	oldTmpDir := manager.TmpDir
-	manager.TmpDir = t.TempDir()
-	t.Cleanup(func() { manager.TmpDir = oldTmpDir })
+	oldTmpDir := tinyserver.TmpDir
+	tinyserver.TmpDir = t.TempDir()
+	t.Cleanup(func() { tinyserver.TmpDir = oldTmpDir })
 
 	backend := serverTestBackend{}
-	ms := manager.New("test", "8000", backend, serverTestLogger())
+	ms := tinyserver.NewManagementService("test", backend, serverTestLogger())
 	ms.SetRouteHooks(serverTestRouteAdd, func(string) error { return nil }, func(string) error { return nil })
 
 	archive := createServerTestArchive(t)
-	if err := ms.UploadArchive("echo", "go", 1, archive, nil, nil, manager.FunctionResourceRequest{}); err != nil {
+	if err := ms.UploadArchive("echo", "go", 1, archive, nil, nil, tinyserver.FunctionResourceRequest{}); err != nil {
 		t.Fatalf("upload test function: %v", err)
 	}
 

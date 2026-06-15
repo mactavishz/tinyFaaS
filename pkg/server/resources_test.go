@@ -1,9 +1,9 @@
-package manager_test
+package server_test
 
 import (
 	"testing"
 
-	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
+	"github.com/OpenFogStack/tinyFaaS/pkg/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -17,7 +17,7 @@ func TestParseCPUNano(t *testing.T) {
 		errContains string
 	}{
 		{name: "cores-1", in: "1", want: 1_000_000_000},
-		{name: "cores-decimal", in: "0.0625", want: manager.DefaultNanoCPUs},
+		{name: "cores-decimal", in: "0.0625", want: server.DefaultNanoCPUs},
 		{name: "cores-trim", in: " 2 ", want: 2_000_000_000},
 		{name: "millicores-50m", in: "50m", want: 50_000_000},
 		{name: "millicores-1000m", in: "1000m", want: 1_000_000_000},
@@ -35,7 +35,7 @@ func TestParseCPUNano(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := manager.ParseCPUNano(tt.in)
+			got, err := server.ParseCPUNano(tt.in)
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.errContains != "" {
@@ -76,7 +76,7 @@ func TestParseMemoryBytes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := manager.ParseMemoryBytes(tt.in)
+			got, err := server.ParseMemoryBytes(tt.in)
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.errContains != "" {
@@ -92,29 +92,29 @@ func TestParseMemoryBytes(t *testing.T) {
 
 func TestEffectiveResourceLimits(t *testing.T) {
 	t.Run("defaults-when-nil", func(t *testing.T) {
-		resolved, effective, backend, err := manager.EffectiveResourceLimits(nil)
+		resolved, effective, backend, err := server.EffectiveResourceLimits(nil)
 		require.NoError(t, err)
-		assert.Equal(t, manager.DefaultCPUString, resolved.CPU)
-		assert.Equal(t, manager.DefaultMemoryString, resolved.Memory)
-		assert.Equal(t, manager.DefaultNanoCPUs, effective.NanoCPUs)
-		assert.Equal(t, manager.DefaultMemoryBytes, effective.MemoryBytes)
+		assert.Equal(t, server.DefaultCPUString, resolved.CPU)
+		assert.Equal(t, server.DefaultMemoryString, resolved.Memory)
+		assert.Equal(t, server.DefaultNanoCPUs, effective.NanoCPUs)
+		assert.Equal(t, server.DefaultMemoryBytes, effective.MemoryBytes)
 		assert.Equal(t, effective.NanoCPUs, backend.NanoCPUs)
 		assert.Equal(t, effective.MemoryBytes, backend.MemoryBytes)
 	})
 
 	t.Run("defaults-when-empty", func(t *testing.T) {
-		limits := &manager.FunctionResources{CPU: "", Memory: "   "}
-		resolved, effective, _, err := manager.EffectiveResourceLimits(limits)
+		limits := &server.FunctionResources{CPU: "", Memory: "   "}
+		resolved, effective, _, err := server.EffectiveResourceLimits(limits)
 		require.NoError(t, err)
-		assert.Equal(t, manager.DefaultCPUString, resolved.CPU)
-		assert.Equal(t, manager.DefaultMemoryString, resolved.Memory)
-		assert.Equal(t, manager.DefaultNanoCPUs, effective.NanoCPUs)
-		assert.Equal(t, manager.DefaultMemoryBytes, effective.MemoryBytes)
+		assert.Equal(t, server.DefaultCPUString, resolved.CPU)
+		assert.Equal(t, server.DefaultMemoryString, resolved.Memory)
+		assert.Equal(t, server.DefaultNanoCPUs, effective.NanoCPUs)
+		assert.Equal(t, server.DefaultMemoryBytes, effective.MemoryBytes)
 	})
 
 	t.Run("trims-input", func(t *testing.T) {
-		limits := &manager.FunctionResources{CPU: " 50m ", Memory: " 96Mi "}
-		resolved, effective, backend, err := manager.EffectiveResourceLimits(limits)
+		limits := &server.FunctionResources{CPU: " 50m ", Memory: " 96Mi "}
+		resolved, effective, backend, err := server.EffectiveResourceLimits(limits)
 		require.NoError(t, err)
 		assert.Equal(t, "50m", resolved.CPU)
 		assert.Equal(t, "96Mi", resolved.Memory)
@@ -125,14 +125,14 @@ func TestEffectiveResourceLimits(t *testing.T) {
 	})
 
 	t.Run("invalid-cpu", func(t *testing.T) {
-		limits := &manager.FunctionResources{CPU: "abc", Memory: "96Mi"}
-		_, _, _, err := manager.EffectiveResourceLimits(limits)
+		limits := &server.FunctionResources{CPU: "abc", Memory: "96Mi"}
+		_, _, _, err := server.EffectiveResourceLimits(limits)
 		require.Error(t, err)
 	})
 
 	t.Run("invalid-memory", func(t *testing.T) {
-		limits := &manager.FunctionResources{CPU: "50m", Memory: "bogus"}
-		_, _, _, err := manager.EffectiveResourceLimits(limits)
+		limits := &server.FunctionResources{CPU: "50m", Memory: "bogus"}
+		_, _, _, err := server.EffectiveResourceLimits(limits)
 		require.Error(t, err)
 	})
 }

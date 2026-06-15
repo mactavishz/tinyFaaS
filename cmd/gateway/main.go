@@ -56,8 +56,7 @@ func main() {
 	go func() {
 		logger.Info("tinyFaaS Gateway starting",
 			"address", addr,
-			"rproxyPort", g.GetRProxyPort(),
-			"managerPort", g.GetManagerPort())
+			"tinyfaasPort", g.GetTinyFaaSPort())
 
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("gateway failed to start", "err", err)

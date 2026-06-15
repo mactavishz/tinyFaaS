@@ -13,9 +13,8 @@ import (
 	"time"
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/docker"
-	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
 	"github.com/OpenFogStack/tinyFaaS/pkg/queue"
-	"github.com/OpenFogStack/tinyFaaS/pkg/rproxy"
+	tinyserver "github.com/OpenFogStack/tinyFaaS/pkg/server"
 	invstats "github.com/OpenFogStack/tinyFaaS/pkg/stats"
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 	"github.com/google/uuid"
@@ -30,8 +29,8 @@ const (
 )
 
 type service struct {
-	ms        *manager.ManagementService
-	rp        *rproxy.RProxy
+	ms        *tinyserver.ManagementService
+	rp        *tinyserver.InvocationRouter
 	tracker   callgraph.FullTracker
 	autoscale *autoscaler.AutoScaler
 	queue     queue.Publisher
@@ -40,12 +39,12 @@ type service struct {
 }
 
 type uploadMetadata struct {
-	FunctionName     string                     `json:"name"`
-	FunctionEnv      string                     `json:"env"`
-	FunctionReplicas int                        `json:"replicas"`
-	FunctionEnvs     []string                   `json:"envs"`
-	FunctionLabels   map[string]string          `json:"labels"`
-	Limits           *manager.FunctionResources `json:"limits"`
+	FunctionName     string                        `json:"name"`
+	FunctionEnv      string                        `json:"env"`
+	FunctionReplicas int                           `json:"replicas"`
+	FunctionEnvs     []string                      `json:"envs"`
+	FunctionLabels   map[string]string             `json:"labels"`
+	Limits           *tinyserver.FunctionResources `json:"limits"`
 }
 
 func main() {
@@ -54,7 +53,7 @@ func main() {
 	port := util.GetEnvOrDefault("TINYFAAS_PORT", defaultPort)
 	id := uuid.New().String()
 
-	var backend manager.Backend
+	var backend tinyserver.Backend
 	switch util.GetEnvOrDefault("BACKEND", "docker") {
 	case "docker":
 		backend = docker.New(id, logger)
@@ -63,7 +62,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	rp := rproxy.New(logger, mode)
+	rp := tinyserver.NewInvocationRouter(logger, mode)
 
 	callGraphConfig, err := callgraph.NewConfigFromEnv("tinyfaas")
 	if err != nil {
@@ -74,7 +73,7 @@ func main() {
 	rp.SetTracker(tracker)
 	tracker.Start()
 
-	ms := manager.New(id, port, backend, logger)
+	ms := tinyserver.NewManagementService(id, backend, logger)
 	ms.SetRouteHooks(rp.Add, rp.Update, rp.Del)
 	ms.SetCallgraphHooks(
 		func(name string, timestamp time.Time, duration time.Duration, cold bool) {
@@ -99,7 +98,7 @@ func main() {
 		logger.Error("failed to initialize autoscaler", "err", err)
 		os.Exit(1)
 	}
-	scaleOp := manager.NewTinyFaaSScaleOp(ms, logger)
+	scaleOp := tinyserver.NewTinyFaaSScaleOp(ms, logger)
 	as := autoscaler.New(autoscalerConfig, scaleOp, logger)
 	ms.SetAutoScaler(as)
 	as.Start()
@@ -255,7 +254,7 @@ func (s *service) uploadHandler(w http.ResponseWriter, r *http.Request) {
 	if meta.FunctionLabels == nil {
 		meta.FunctionLabels = map[string]string{}
 	}
-	if err := s.ms.UploadArchive(meta.FunctionName, meta.FunctionEnv, meta.FunctionReplicas, archivePath, parseFunctionEnvs(meta.FunctionEnvs), meta.FunctionLabels, manager.FunctionResourceRequest{Limits: meta.Limits}); err != nil {
+	if err := s.ms.UploadArchive(meta.FunctionName, meta.FunctionEnv, meta.FunctionReplicas, archivePath, parseFunctionEnvs(meta.FunctionEnvs), meta.FunctionLabels, tinyserver.FunctionResourceRequest{Limits: meta.Limits}); err != nil {
 		s.logger.Error("upload failed", "err", err)
 		http.Error(w, "failed to upload function", http.StatusInternalServerError)
 		return
@@ -265,10 +264,10 @@ func (s *service) uploadHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *service) writeUploadArchive(src io.Reader) (string, int64, error) {
-	if err := os.MkdirAll(manager.TmpDir, 0777); err != nil {
+	if err := os.MkdirAll(tinyserver.TmpDir, 0777); err != nil {
 		return "", 0, err
 	}
-	archiveFile, err := os.CreateTemp(manager.TmpDir, "upload-*.zip")
+	archiveFile, err := os.CreateTemp(tinyserver.TmpDir, "upload-*.zip")
 	if err != nil {
 		return "", 0, err
 	}
@@ -374,14 +373,14 @@ func (s *service) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var d struct {
-		FunctionName     string                     `json:"name"`
-		FunctionEnv      string                     `json:"env"`
-		FunctionReplicas int                        `json:"replicas"`
-		FunctionURL      string                     `json:"url"`
-		FunctionEnvs     []string                   `json:"envs"`
-		SubFolder        string                     `json:"subfolder_path"`
-		FunctionLabels   map[string]string          `json:"labels"`
-		Limits           *manager.FunctionResources `json:"limits"`
+		FunctionName     string                        `json:"name"`
+		FunctionEnv      string                        `json:"env"`
+		FunctionReplicas int                           `json:"replicas"`
+		FunctionURL      string                        `json:"url"`
+		FunctionEnvs     []string                      `json:"envs"`
+		SubFolder        string                        `json:"subfolder_path"`
+		FunctionLabels   map[string]string             `json:"labels"`
+		Limits           *tinyserver.FunctionResources `json:"limits"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
 		http.Error(w, "failed to decode url upload request", http.StatusBadRequest)
@@ -390,7 +389,7 @@ func (s *service) urlUploadHandler(w http.ResponseWriter, r *http.Request) {
 	if d.FunctionLabels == nil {
 		d.FunctionLabels = map[string]string{}
 	}
-	if err := s.ms.UrlUpload(d.FunctionName, d.FunctionEnv, d.FunctionReplicas, d.FunctionURL, d.SubFolder, parseFunctionEnvs(d.FunctionEnvs), d.FunctionLabels, manager.FunctionResourceRequest{Limits: d.Limits}); err != nil {
+	if err := s.ms.UrlUpload(d.FunctionName, d.FunctionEnv, d.FunctionReplicas, d.FunctionURL, d.SubFolder, parseFunctionEnvs(d.FunctionEnvs), d.FunctionLabels, tinyserver.FunctionResourceRequest{Limits: d.Limits}); err != nil {
 		http.Error(w, "failed to upload function from url", http.StatusInternalServerError)
 		return
 	}

@@ -28,20 +28,6 @@ type Gateway struct {
 // Option is a functional option for configuring Gateway
 type Option func(*Gateway)
 
-// WithRProxyPort sets the rproxy port
-func WithRProxyPort(port string) Option {
-	return func(g *Gateway) {
-		g.tinyfaasPort = port
-	}
-}
-
-// WithManagerPort sets the manager port
-func WithManagerPort(port string) Option {
-	return func(g *Gateway) {
-		g.tinyfaasPort = port
-	}
-}
-
 func WithTinyFaaSPort(port string) Option {
 	return func(g *Gateway) {
 		g.tinyfaasPort = port
@@ -78,13 +64,8 @@ func (g *Gateway) IsProd() bool {
 	return strings.ToLower(g.mode) == "production"
 }
 
-// rproxyAddr returns the full rproxy address
-func (g *Gateway) rproxyAddr() string {
-	return fmt.Sprintf("127.0.0.1:%s", g.tinyfaasPort)
-}
-
-// managerAddr returns the full manager address
-func (g *Gateway) managerAddr() string {
+// tinyfaasAddr returns the full internal merged service address.
+func (g *Gateway) tinyfaasAddr() string {
 	return fmt.Sprintf("127.0.0.1:%s", g.tinyfaasPort)
 }
 
@@ -187,73 +168,21 @@ func (g *Gateway) InvokeMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// HandleFunctionInvoke handles /fn/* requests to rproxy
+// HandleFunctionInvoke handles /fn/* requests
 func (g *Gateway) HandleFunctionInvoke(w http.ResponseWriter, r *http.Request) {
 	// Rewrite path: /fn/funcname -> /invoke/funcname
 	r.Header.Del("X-Tinyfaas-Async")
 	r.URL.Path = "/invoke" + strings.TrimPrefix(r.URL.Path, "/fn")
-	g.proxyRequest(w, r, g.rproxyAddr())
+	g.proxyRequest(w, r, g.tinyfaasAddr())
 }
 
 func (g *Gateway) HandleAsyncFunctionInvoke(w http.ResponseWriter, r *http.Request) {
 	r.Header.Del("X-Tinyfaas-Async")
 	r.URL.Path = "/async-invoke" + strings.TrimPrefix(r.URL.Path, "/async-fn")
-	g.proxyRequest(w, r, g.rproxyAddr())
+	g.proxyRequest(w, r, g.tinyfaasAddr())
 }
 
-// HandleSystemScaleUp handles /system/scale-up requests (restricted to localhost)
-func (g *Gateway) HandleSystemScaleUp(w http.ResponseWriter, r *http.Request) {
-	sourceIP := g.extractSourceIP(r)
-	if sourceIP != "127.0.0.1" && sourceIP != "::1" && sourceIP != "localhost" {
-		http.Error(w, "Forbidden: scale-up endpoint is restricted to internal services only", http.StatusForbidden)
-		g.logger.Warn("unauthorized access to scale-up endpoint", "sourceIP", sourceIP)
-		return
-	}
-
-	r.URL.Path = "/scale-up"
-	g.proxyRequest(w, r, g.managerAddr())
-}
-
-// HandleSystemHeartbeat handles /system/heartbeat requests (restricted to localhost)
-func (g *Gateway) HandleSystemHeartbeat(w http.ResponseWriter, r *http.Request) {
-	sourceIP := g.extractSourceIP(r)
-	if sourceIP != "127.0.0.1" && sourceIP != "::1" && sourceIP != "localhost" {
-		http.Error(w, "Forbidden: heartbeat endpoint is restricted to internal services only", http.StatusForbidden)
-		g.logger.Warn("unauthorized access to heartbeat endpoint", "sourceIP", sourceIP)
-		return
-	}
-
-	r.URL.Path = "/heartbeat"
-	g.proxyRequest(w, r, g.managerAddr())
-}
-
-// HandleSystemRequestStart handles /system/request-start requests (restricted to localhost)
-func (g *Gateway) HandleSystemRequestStart(w http.ResponseWriter, r *http.Request) {
-	sourceIP := g.extractSourceIP(r)
-	if sourceIP != "127.0.0.1" && sourceIP != "::1" && sourceIP != "localhost" {
-		http.Error(w, "Forbidden: request-start endpoint is restricted to internal services only", http.StatusForbidden)
-		g.logger.Warn("unauthorized access to request-start endpoint", "sourceIP", sourceIP)
-		return
-	}
-
-	r.URL.Path = "/request-start"
-	g.proxyRequest(w, r, g.managerAddr())
-}
-
-// HandleSystemRequestFinish handles /system/request-finish requests (restricted to localhost)
-func (g *Gateway) HandleSystemRequestFinish(w http.ResponseWriter, r *http.Request) {
-	sourceIP := g.extractSourceIP(r)
-	if sourceIP != "127.0.0.1" && sourceIP != "::1" && sourceIP != "localhost" {
-		http.Error(w, "Forbidden: request-finish endpoint is restricted to internal services only", http.StatusForbidden)
-		g.logger.Warn("unauthorized access to request-finish endpoint", "sourceIP", sourceIP)
-		return
-	}
-
-	r.URL.Path = "/request-finish"
-	g.proxyRequest(w, r, g.managerAddr())
-}
-
-// HandleSystemOther handles other /system/* requests to manager
+// HandleSystemOther handles other /system/* requests
 func (g *Gateway) HandleSystemOther(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		trimmedPath := strings.TrimPrefix(r.URL.Path, "/system")
@@ -261,12 +190,12 @@ func (g *Gateway) HandleSystemOther(w http.ResponseWriter, r *http.Request) {
 			g.resetStatsFromDeleteRequest(r)
 		}
 	}
-	// Strip /system prefix before forwarding to manager
+	// Strip /system prefix before forwarding to the merged service
 	r.URL.Path = strings.TrimPrefix(r.URL.Path, "/system")
 	if r.URL.Path == "" {
 		r.URL.Path = "/"
 	}
-	g.proxyRequest(w, r, g.managerAddr())
+	g.proxyRequest(w, r, g.tinyfaasAddr())
 }
 
 func (g *Gateway) resetStatsFromDeleteRequest(r *http.Request) {
@@ -304,27 +233,27 @@ func (g *Gateway) HandleRoot(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-// HandleCallgraph handles /debug/callgraph requests (proxies to rproxy)
+// HandleCallgraph handles /debug/callgraph requests.
 func (g *Gateway) HandleCallgraph(w http.ResponseWriter, r *http.Request) {
 	r.URL.Path = "/callgraph"
-	g.proxyRequest(w, r, g.rproxyAddr())
+	g.proxyRequest(w, r, g.tinyfaasAddr())
 }
 
-// HandleCallgraphFunction handles /debug/callgraph/function/* requests (proxies to rproxy)
+// HandleCallgraphFunction handles /debug/callgraph/function/* requests.
 func (g *Gateway) HandleCallgraphFunction(w http.ResponseWriter, r *http.Request) {
 	r.URL.Path = "/callgraph/function/" + strings.TrimPrefix(r.URL.Path, "/system/callgraph/function/")
-	g.proxyRequest(w, r, g.rproxyAddr())
+	g.proxyRequest(w, r, g.tinyfaasAddr())
 }
 
-// HandleCallgraphEdge handles /debug/callgraph/edge requests (proxies to rproxy)
+// HandleCallgraphEdge handles /debug/callgraph/edge requests.
 func (g *Gateway) HandleCallgraphEdge(w http.ResponseWriter, r *http.Request) {
 	r.URL.Path = "/callgraph/edge"
-	g.proxyRequest(w, r, g.rproxyAddr())
+	g.proxyRequest(w, r, g.tinyfaasAddr())
 }
 
 func (g *Gateway) HandleFunctionStatsProxy(w http.ResponseWriter, r *http.Request) {
 	r.URL.Path = "/stats/function/" + strings.TrimPrefix(r.URL.Path, "/system/stats/function/")
-	g.proxyRequest(w, r, g.managerAddr())
+	g.proxyRequest(w, r, g.tinyfaasAddr())
 }
 
 // RegisterHandlers registers all gateway handlers on the provided mux
@@ -333,14 +262,9 @@ func (g *Gateway) RegisterHandlers(mux *http.ServeMux) {
 	mux.Handle("/fn/", g.recordInvocationStats(g.InvokeMiddleware(g.HandleFunctionInvoke)))
 	mux.Handle("/async-fn/", g.InvokeMiddleware(g.HandleAsyncFunctionInvoke))
 
-	// System endpoints with access control
-	mux.HandleFunc("/system/scale-up", g.HandleSystemScaleUp)
-	mux.HandleFunc("/system/heartbeat", g.HandleSystemHeartbeat)
-	mux.HandleFunc("/system/request-start", g.HandleSystemRequestStart)
-	mux.HandleFunc("/system/request-finish", g.HandleSystemRequestFinish)
 	mux.HandleFunc("/system/stats/function/", g.HandleFunctionStatsProxy)
 
-	// Other system endpoints
+	// System endpoints
 	mux.HandleFunc("/system/", g.HandleSystemOther)
 
 	mux.HandleFunc("/system/callgraph/function/", g.HandleCallgraphFunction)
@@ -354,12 +278,7 @@ func (g *Gateway) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/", g.HandleRoot)
 }
 
-// GetRProxyPort returns the rproxy port
-func (g *Gateway) GetRProxyPort() string {
-	return g.tinyfaasPort
-}
-
-// GetManagerPort returns the manager port
-func (g *Gateway) GetManagerPort() string {
+// GetTinyFaaSPort returns the merged tinyFaaS service port.
+func (g *Gateway) GetTinyFaaSPort() string {
 	return g.tinyfaasPort
 }

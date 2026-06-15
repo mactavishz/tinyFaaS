@@ -1,4 +1,4 @@
-package manager
+package server
 
 import (
 	"archive/zip"
@@ -7,9 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -163,21 +161,17 @@ func (h *testHandler) restartCount() int {
 	return h.restartCalls
 }
 
-func newManagerWithRProxy(t *testing.T, backend Backend) (*ManagementService, *rproxyRecorder) {
+func newManagerWithRouteRecorder(t *testing.T, backend Backend) (*ManagementService, *routeRecorder) {
 	t.Helper()
 
-	recorder := newRProxyRecorder()
-	server := httptest.NewServer(recorder)
-	t.Cleanup(server.Close)
-
-	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
-	require.NoError(t, err)
-
-	ms := New("test", port, backend, nopLogger())
+	recorder := newRouteRecorder()
+	ms := NewManagementService("test", backend, nopLogger())
+	ms.SetRouteHooks(recorder.addRoute, recorder.clearRoute, recorder.deleteRoute)
+	ms.SetCallgraphHooks(recorder.recordScaleUp, recorder.recordScaleDown, recorder.resetCallgraph)
 	return ms, recorder
 }
 
-type rproxyRecorder struct {
+type routeRecorder struct {
 	mu       sync.Mutex
 	requests []recordedRequest
 }
@@ -195,20 +189,69 @@ type scaleUpRecord struct {
 	Cold         bool   `json:"cold"`
 }
 
-func newRProxyRecorder() *rproxyRecorder {
-	return &rproxyRecorder{}
+func newRouteRecorder() *routeRecorder {
+	return &routeRecorder{}
 }
 
-func (r *rproxyRecorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	body, _ := io.ReadAll(req.Body)
+func (r *routeRecorder) addRoute(name string, ips []string, labels map[string]string) error {
+	body, _ := json.Marshal(struct {
+		FunctionName string            `json:"name"`
+		FunctionIPs  []string          `json:"ips"`
+		Labels       map[string]string `json:"labels,omitempty"`
+	}{FunctionName: name, FunctionIPs: ips, Labels: labels})
+	r.record(http.MethodPut, "/config", string(body))
+	return nil
+}
+
+func (r *routeRecorder) clearRoute(name string) error {
+	body, _ := json.Marshal(struct {
+		FunctionName string `json:"name"`
+	}{FunctionName: name})
+	r.record(http.MethodPatch, "/config", string(body))
+	return nil
+}
+
+func (r *routeRecorder) deleteRoute(name string) error {
+	body, _ := json.Marshal(struct {
+		FunctionName string `json:"name"`
+	}{FunctionName: name})
+	r.record(http.MethodDelete, "/config", string(body))
+	return nil
+}
+
+func (r *routeRecorder) recordScaleUp(name string, timestamp time.Time, duration time.Duration, cold bool) {
+	body, _ := json.Marshal(scaleUpRecord{
+		FunctionName: name,
+		Timestamp:    timestamp.UnixNano(),
+		Duration:     duration.Nanoseconds(),
+		Cold:         cold,
+	})
+	r.record(http.MethodPost, "/callgraph/scaleup", string(body))
+}
+
+func (r *routeRecorder) recordScaleDown(name string, timestamp time.Time, duration time.Duration) {
+	body, _ := json.Marshal(struct {
+		FunctionName string `json:"name"`
+		Timestamp    int64  `json:"timestamp"`
+		Duration     int64  `json:"duration_ns"`
+	}{FunctionName: name, Timestamp: timestamp.UnixNano(), Duration: duration.Nanoseconds()})
+	r.record(http.MethodPost, "/callgraph/scaledown", string(body))
+}
+
+func (r *routeRecorder) resetCallgraph(name string) {
+	body, _ := json.Marshal(struct {
+		FunctionName string `json:"name"`
+	}{FunctionName: name})
+	r.record(http.MethodPost, "/callgraph/reset", string(body))
+}
+
+func (r *routeRecorder) record(method string, path string, body string) {
 	r.mu.Lock()
-	r.requests = append(r.requests, recordedRequest{method: req.Method, path: req.URL.Path, body: string(body)})
+	r.requests = append(r.requests, recordedRequest{method: method, path: path, body: body})
 	r.mu.Unlock()
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
 }
 
-func (r *rproxyRecorder) count(method string, path string) int {
+func (r *routeRecorder) count(method string, path string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	count := 0
@@ -220,7 +263,7 @@ func (r *rproxyRecorder) count(method string, path string) int {
 	return count
 }
 
-func (r *rproxyRecorder) scaleUpRecords() []scaleUpRecord {
+func (r *routeRecorder) scaleUpRecords() []scaleUpRecord {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -267,7 +310,7 @@ func TestCreateFunctionRedeployWaitsForInFlightRequest(t *testing.T) {
 	defer func() { TmpDir = oldTmpDir }()
 
 	backend := newTestBackend()
-	ms, rproxy := newManagerWithRProxy(t, backend)
+	ms, routeRecorder := newManagerWithRouteRecorder(t, backend)
 	as := installAutoScaler(ms)
 
 	archive := makeZipArchive(t)
@@ -308,8 +351,8 @@ func TestCreateFunctionRedeployWaitsForInFlightRequest(t *testing.T) {
 	assert.Equal(t, 1, startCalls)
 	assert.Equal(t, 1, stopCalls)
 	assert.Equal(t, 1, destroyCalls)
-	assert.Equal(t, 2, rproxy.count(http.MethodPut, "/config"))
-	assert.Equal(t, 1, rproxy.count(http.MethodPatch, "/config"))
+	assert.Equal(t, 2, routeRecorder.count(http.MethodPut, "/config"))
+	assert.Equal(t, 1, routeRecorder.count(http.MethodPatch, "/config"))
 
 	status := as.GetFunctionStatus()["echo"]
 	assert.Equal(t, autoscaler.StateActive, status.State)
@@ -320,7 +363,7 @@ func TestCreateFunctionRedeployWaitsForInFlightRequest(t *testing.T) {
 
 func TestScaleDownWaitsForInFlightRequest(t *testing.T) {
 	backend := newTestBackend()
-	ms, rproxy := newManagerWithRProxy(t, backend)
+	ms, routeRecorder := newManagerWithRouteRecorder(t, backend)
 	as := installAutoScaler(ms)
 
 	handler := &testHandler{name: "echo", ips: []string{"10.0.0.1"}, running: true}
@@ -338,7 +381,7 @@ func TestScaleDownWaitsForInFlightRequest(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	_, stopCalls, _ := handler.counts()
 	assert.Equal(t, 0, stopCalls)
-	assert.Equal(t, 0, rproxy.count(http.MethodPatch, "/config"))
+	assert.Equal(t, 0, routeRecorder.count(http.MethodPatch, "/config"))
 
 	ms.EndRequest("echo")
 	require.NoError(t, <-scaleDownDone)
@@ -348,13 +391,13 @@ func TestScaleDownWaitsForInFlightRequest(t *testing.T) {
 	assert.Equal(t, autoscaler.StateScaledDown, state)
 	_, stopCalls, _ = handler.counts()
 	assert.Equal(t, 1, stopCalls)
-	assert.Equal(t, 1, rproxy.count(http.MethodPatch, "/config"))
+	assert.Equal(t, 1, routeRecorder.count(http.MethodPatch, "/config"))
 	assert.False(t, handler.IsRunning())
 }
 
-func TestScaleDownFailureRestoresRProxyRoute(t *testing.T) {
+func TestScaleDownFailureRestoresRoute(t *testing.T) {
 	backend := newTestBackend()
-	ms, rproxy := newManagerWithRProxy(t, backend)
+	ms, routeRecorder := newManagerWithRouteRecorder(t, backend)
 	as := installAutoScaler(ms)
 
 	handler := &testHandler{
@@ -378,13 +421,13 @@ func TestScaleDownFailureRestoresRProxyRoute(t *testing.T) {
 	_, stopCalls, _ := handler.counts()
 	assert.Equal(t, 1, stopCalls)
 	assert.True(t, handler.IsRunning())
-	assert.Equal(t, 1, rproxy.count(http.MethodPatch, "/config"))
-	assert.Equal(t, 1, rproxy.count(http.MethodPut, "/config"))
+	assert.Equal(t, 1, routeRecorder.count(http.MethodPatch, "/config"))
+	assert.Equal(t, 1, routeRecorder.count(http.MethodPut, "/config"))
 }
 
 func TestScaleUpRecordsOnlyClaimingPrewarmDuringDemandRace(t *testing.T) {
 	backend := newTestBackend()
-	ms, rproxy := newManagerWithRProxy(t, backend)
+	ms, routeRecorder := newManagerWithRouteRecorder(t, backend)
 	as := installAutoScaler(ms)
 
 	restartStarted := make(chan struct{})
@@ -422,7 +465,7 @@ func TestScaleUpRecordsOnlyClaimingPrewarmDuringDemandRace(t *testing.T) {
 	require.NoError(t, <-demandDone)
 
 	assert.Equal(t, 1, handler.restartCount())
-	records := rproxy.scaleUpRecords()
+	records := routeRecorder.scaleUpRecords()
 	require.Len(t, records, 1)
 	assert.Equal(t, "echo", records[0].FunctionName)
 	assert.False(t, records[0].Cold)
@@ -430,7 +473,7 @@ func TestScaleUpRecordsOnlyClaimingPrewarmDuringDemandRace(t *testing.T) {
 
 func TestScaleUpRecordsOnlyClaimingDemandDuringPrewarmRace(t *testing.T) {
 	backend := newTestBackend()
-	ms, rproxy := newManagerWithRProxy(t, backend)
+	ms, routeRecorder := newManagerWithRouteRecorder(t, backend)
 	as := installAutoScaler(ms)
 
 	restartStarted := make(chan struct{})
@@ -468,7 +511,7 @@ func TestScaleUpRecordsOnlyClaimingDemandDuringPrewarmRace(t *testing.T) {
 	require.NoError(t, <-prewarmDone)
 
 	assert.Equal(t, 1, handler.restartCount())
-	records := rproxy.scaleUpRecords()
+	records := routeRecorder.scaleUpRecords()
 	require.Len(t, records, 1)
 	assert.Equal(t, "echo", records[0].FunctionName)
 	assert.True(t, records[0].Cold)
@@ -476,7 +519,7 @@ func TestScaleUpRecordsOnlyClaimingDemandDuringPrewarmRace(t *testing.T) {
 
 func TestScaleUpActiveFunctionDoesNotRecordScaleUp(t *testing.T) {
 	backend := newTestBackend()
-	ms, rproxy := newManagerWithRProxy(t, backend)
+	ms, routeRecorder := newManagerWithRouteRecorder(t, backend)
 	as := installAutoScaler(ms)
 
 	handler := &testHandler{name: "echo", ips: []string{"10.0.0.1"}, running: true}
@@ -487,12 +530,12 @@ func TestScaleUpActiveFunctionDoesNotRecordScaleUp(t *testing.T) {
 	require.NoError(t, ms.ScaleUp("echo", true))
 
 	assert.Equal(t, 0, handler.restartCount())
-	assert.Empty(t, rproxy.scaleUpRecords())
+	assert.Empty(t, routeRecorder.scaleUpRecords())
 }
 
 func TestGetReturnsFunctionConfig(t *testing.T) {
 	backend := newTestBackend()
-	ms, _ := newManagerWithRProxy(t, backend)
+	ms, _ := newManagerWithRouteRecorder(t, backend)
 	handler := &testHandler{name: "echo", ips: []string{"10.0.0.1"}, running: true}
 	ms.functionHandlers["echo"] = handler
 	ms.functionConfigs["echo"] = FunctionConfig{Name: "echo", Env: "python3"}
