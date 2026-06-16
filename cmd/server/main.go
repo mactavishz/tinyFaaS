@@ -105,10 +105,6 @@ func main() {
 	rp.SetAutoScalerEnabled(autoscalerConfig.Enabled)
 	rp.SetScaleUpHook(ms.ScaleUp)
 	rp.SetRequestHooks(ms.StartRequest, ms.EndRequest)
-	rp.SetHeartbeatHooks(ms.Heartbeat, ms.HeartbeatBatch)
-	if autoscalerConfig.Enabled {
-		rp.StartHeartbeatWorker()
-	}
 
 	publisherConfig := queue.NATSConfig{
 		URL:       util.GetEnvOrDefault("TINYFAAS_NATS_URL", "nats://127.0.0.1:4222"),
@@ -155,9 +151,6 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_ = server.Shutdown(ctx)
-	if autoscalerConfig.Enabled {
-		rp.StopHeartbeatWorker()
-	}
 	tracker.Stop()
 	as.Stop()
 	_ = s.queue.Close()
