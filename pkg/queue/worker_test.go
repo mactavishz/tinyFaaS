@@ -74,7 +74,7 @@ func TestWorkerAcksCompletedHTTPResponseAndPreservesHeaders(t *testing.T) {
 	if acks != 1 {
 		t.Fatalf("expected completed HTTP response acked once, got %d", acks)
 	}
-	if gotPath != "/invoke/next" || gotQuery != "a=b" {
+	if gotPath != "/queue-fn/next" || gotQuery != "a=b" {
 		t.Fatalf("unexpected target path/query: %s?%s", gotPath, gotQuery)
 	}
 	if gotCallID != "call-1" || gotSource != "caller" {
@@ -103,5 +103,39 @@ func TestWorkerLeavesTransportFailureUnacked(t *testing.T) {
 
 	if acks != 0 {
 		t.Fatalf("expected transport failure unacked, got %d acks", acks)
+	}
+}
+
+// TestWorkerHonoursCustomDispatchPath verifies that overriding DispatchPath
+// (e.g., to bypass the gateway during local testing) routes the dequeued
+// invocation to the configured path rather than the default /queue-fn/.
+func TestWorkerHonoursCustomDispatchPath(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	w := NewWorker(WorkerConfig{
+		TargetBaseURL: server.URL,
+		DispatchPath:  "/invoke/",
+	}, testLogger())
+	msg, err := json.Marshal(Request{Function: "next", Method: http.MethodPost})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	acks := 0
+	w.handleMessageData(msg, func() error {
+		acks++
+		return nil
+	})
+
+	if acks != 1 {
+		t.Fatalf("expected completed HTTP response acked once, got %d", acks)
+	}
+	if gotPath != "/invoke/next" {
+		t.Fatalf("expected dispatch via /invoke/, got %s", gotPath)
 	}
 }

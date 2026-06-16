@@ -15,14 +15,20 @@ import (
 )
 
 type WorkerConfig struct {
-	NATSURL       string
-	ClusterID     string
-	ClientID      string
-	Subject       string
-	QueueGroup    string
+	NATSURL    string
+	ClusterID  string
+	ClientID   string
+	Subject    string
+	QueueGroup string
+	// TargetBaseURL is the gateway base URL (default http://127.0.0.1:8080).
+	// The worker dispatches dequeued requests via DispatchPath ("/queue-fn/")
+	// so they go through the gateway's scaling middleware.
 	TargetBaseURL string
-	AckWait       time.Duration
-	MaxInflight   int
+	// DispatchPath is the path prefix used for dequeued invocations.
+	// Defaults to "/queue-fn/" which is the gateway's async dispatch route.
+	DispatchPath string
+	AckWait      time.Duration
+	MaxInflight  int
 }
 
 type Worker struct {
@@ -52,7 +58,14 @@ func NewWorker(config WorkerConfig, logger *slog.Logger) *Worker {
 		config.QueueGroup = DefaultQueue
 	}
 	if config.TargetBaseURL == "" {
-		config.TargetBaseURL = "http://127.0.0.1:8000"
+		// Default to the gateway so dequeued invocations go through the
+		// scaling middleware and singleflight scale-up.
+		config.TargetBaseURL = "http://127.0.0.1:8080"
+	}
+	if config.DispatchPath == "" {
+		config.DispatchPath = "/queue-fn/"
+	} else if !strings.HasSuffix(config.DispatchPath, "/") {
+		config.DispatchPath += "/"
 	}
 	if config.AckWait <= 0 {
 		config.AckWait = DefaultAckWait
@@ -179,7 +192,7 @@ func (w *Worker) invoke(q Request) error {
 		method = http.MethodPost
 	}
 
-	target := strings.TrimRight(w.config.TargetBaseURL, "/") + "/invoke/" + strings.TrimLeft(q.Function, "/")
+	target := strings.TrimRight(w.config.TargetBaseURL, "/") + w.config.DispatchPath + strings.TrimLeft(q.Function, "/")
 	if q.Path != "" && q.Path != "/" {
 		target += "/" + strings.TrimLeft(q.Path, "/")
 	}
