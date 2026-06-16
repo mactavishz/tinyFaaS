@@ -13,7 +13,8 @@ import (
 
 func main() {
 	logger := util.CreateLogger()
-	port := util.GetEnvOrDefault("TINYFAAS_PORT", "8000")
+	gatewayPort := util.GetEnvOrDefault("GATEWAY_PORT", "8080")
+	defaultGateway := "http://127.0.0.1:" + gatewayPort
 	ackWait := queue.DefaultAckWait
 	if raw := os.Getenv("TINYFAAS_QUEUE_ACK_WAIT"); raw != "" {
 		if parsed, err := time.ParseDuration(raw); err == nil {
@@ -32,12 +33,16 @@ func main() {
 	}
 
 	worker := queue.NewWorker(queue.WorkerConfig{
-		NATSURL:       util.GetEnvOrDefault("TINYFAAS_NATS_URL", "nats://127.0.0.1:4222"),
-		ClusterID:     util.GetEnvOrDefault("TINYFAAS_NATS_CLUSTER", queue.DefaultClusterID),
-		ClientID:      util.GetEnvOrDefault("TINYFAAS_QUEUE_CLIENT_ID", "tinyfaas-queue-worker"),
-		Subject:       util.GetEnvOrDefault("TINYFAAS_NATS_SUBJECT", queue.DefaultSubject),
-		QueueGroup:    util.GetEnvOrDefault("TINYFAAS_NATS_QUEUE_GROUP", queue.DefaultQueue),
-		TargetBaseURL: util.GetEnvOrDefault("TINYFAAS_INTERNAL_URL", "http://127.0.0.1:"+port),
+		NATSURL:    util.GetEnvOrDefault("TINYFAAS_NATS_URL", "nats://127.0.0.1:4222"),
+		ClusterID:  util.GetEnvOrDefault("TINYFAAS_NATS_CLUSTER", queue.DefaultClusterID),
+		ClientID:   util.GetEnvOrDefault("TINYFAAS_QUEUE_CLIENT_ID", "tinyfaas-queue-worker"),
+		Subject:    util.GetEnvOrDefault("TINYFAAS_NATS_SUBJECT", queue.DefaultSubject),
+		QueueGroup: util.GetEnvOrDefault("TINYFAAS_NATS_QUEUE_GROUP", queue.DefaultQueue),
+		// TINYFAAS_INTERNAL_URL points at the gateway by default so dequeued
+		// async invocations go through the scaling middleware and singleflight
+		// scale-up.
+		TargetBaseURL: util.GetEnvOrDefault("TINYFAAS_INTERNAL_URL", defaultGateway),
+		DispatchPath:  util.GetEnvOrDefault("TINYFAAS_QUEUE_DISPATCH_PATH", "/queue-fn/"),
 		AckWait:       ackWait,
 		MaxInflight:   maxInflight,
 	}, logger)
