@@ -179,28 +179,3 @@ func (ms *ManagementService) EndRequest(functionName string) {
 	}
 	ms.autoscaler.EndInvocation(functionName)
 }
-
-// Heartbeat records activity for a function to prevent it from being scaled down
-func (ms *ManagementService) Heartbeat(functionName string) error {
-	if ms.autoscaler == nil || !ms.autoscaler.IsEnabled() {
-		return fmt.Errorf("autoscaler not enabled")
-	}
-
-	// Record activity in autoscaler
-	ms.autoscaler.RecordActivity(functionName)
-
-	return nil
-}
-
-// HeartbeatBatch records activity for multiple functions to prevent them from being scaled down.
-// This is more efficient than individual heartbeats for batch processing.
-func (ms *ManagementService) HeartbeatBatch(functionNames []string) error {
-	if ms.autoscaler == nil || !ms.autoscaler.IsEnabled() {
-		return fmt.Errorf("autoscaler not enabled")
-	}
-
-	// Record batch activity in autoscaler
-	ms.autoscaler.RecordActivityBatch(functionNames)
-
-	return nil
-}
