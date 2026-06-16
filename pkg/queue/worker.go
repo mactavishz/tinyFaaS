@@ -208,6 +208,6 @@ func (w *Worker) invoke(q Request) error {
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
-	w.logger.Info("queued invocation completed", "function", q.Function, "status", resp.StatusCode, "duration", time.Since(start))
+	w.logger.Debug("queued invocation completed", "function", q.Function, "status", resp.StatusCode, "duration", time.Since(start))
 	return nil
 }

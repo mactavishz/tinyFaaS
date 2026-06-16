@@ -31,6 +31,8 @@ func TestWorkerAcksCompletedHTTPResponseAndPreservesHeaders(t *testing.T) {
 	var gotPath string
 	var gotQuery string
 	var gotCallID string
+	var gotExecID string
+	var gotForwardedFor string
 	var gotSource string
 	var gotAsyncHeader string
 
@@ -38,6 +40,8 @@ func TestWorkerAcksCompletedHTTPResponseAndPreservesHeaders(t *testing.T) {
 		gotPath = r.URL.Path
 		gotQuery = r.URL.RawQuery
 		gotCallID = r.Header.Get("X-Call-Id")
+		gotExecID = r.Header.Get("X-Exec-Id")
+		gotForwardedFor = r.Header.Get("X-Forwarded-For")
 		gotSource = r.Header.Get("X-Source-Function")
 		gotAsyncHeader = r.Header.Get("X-Tinyfaas-Async")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -51,6 +55,8 @@ func TestWorkerAcksCompletedHTTPResponseAndPreservesHeaders(t *testing.T) {
 		QueryString: "a=b",
 		Header: http.Header{
 			"X-Call-Id":         []string{"call-1"},
+			"X-Exec-Id":         []string{"exec-1"},
+			"X-Forwarded-For":   []string{"10.0.0.2:3456"},
 			"X-Source-Function": []string{"caller"},
 			"X-Tinyfaas-Async":  []string{"true"},
 		},
@@ -73,6 +79,9 @@ func TestWorkerAcksCompletedHTTPResponseAndPreservesHeaders(t *testing.T) {
 	}
 	if gotCallID != "call-1" || gotSource != "caller" {
 		t.Fatalf("expected callgraph headers preserved, callID=%q source=%q", gotCallID, gotSource)
+	}
+	if gotExecID != "exec-1" || gotForwardedFor != "10.0.0.2:3456" {
+		t.Fatalf("expected execution headers preserved, execID=%q forwarded=%q", gotExecID, gotForwardedFor)
 	}
 	if gotAsyncHeader != "" {
 		t.Fatalf("expected async header stripped, got %q", gotAsyncHeader)

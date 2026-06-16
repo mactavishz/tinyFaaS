@@ -16,7 +16,7 @@ const (
 	DefaultSubject   = "faas-request"
 	DefaultQueue     = "faas"
 	DefaultAckWait   = 5*time.Minute + 5*time.Second
-	DefaultMaxFlight = 1
+	DefaultMaxFlight = 8
 )
 
 type Request struct {
@@ -102,7 +102,7 @@ func (p *NATSPublisher) Queue(req *Request) error {
 		return fmt.Errorf("nats publisher closed")
 	}
 
-	p.logger.Info("queueing async invocation", "function", req.Function, "bytes", len(req.Body), "subject", subject)
+	p.logger.Debug("queueing async invocation", "function", req.Function, "bytes", len(req.Body), "subject", subject)
 	return conn.Publish(subject, body)
 }
 
