@@ -286,16 +286,6 @@ func (r *InvocationRouter) invoke(name string, payload []byte, header http.Heade
 
 	r.logger.Debug("found function route", "ips", calleeRoute.ips, "active", calleeRoute.isActive)
 
-	prewarmScheduledBeforeScaleUp := false
-	if calleeRoute.callgraphEnabled && r.autoscalerEnabled && !calleeRoute.isActive && r.tracker != nil && r.tracker.PrewarmEnabled() {
-		coldStartOffset := time.Duration(0)
-		if stats, ok := r.tracker.GetFunctionStats(name); ok {
-			coldStartOffset = stats.AvgColdStartDuration
-		}
-		r.prewarmDownstreamWithLeadOffset(name, coldStartOffset)
-		prewarmScheduledBeforeScaleUp = true
-	}
-
 	// Check if function is scaled down and trigger cold start if needed
 	if r.autoscalerEnabled && !calleeRoute.isActive {
 		r.logger.Info("function is scaled down, triggering cold start", "name", name)
@@ -362,17 +352,16 @@ func (r *InvocationRouter) invoke(name string, payload []byte, header http.Heade
 
 	r.logger.Debug("chosen function ip", "ip", ip)
 
-	// Trigger prewarming for downstream functions (fire-and-forget, non-blocking)
-	// Prewarming requires both callgraph and autoscaler to be enabled
-	if !prewarmScheduledBeforeScaleUp && calleeRoute.callgraphEnabled && r.autoscalerEnabled && r.tracker != nil && r.tracker.PrewarmEnabled() {
-		go r.prewarmDownstream(name)
-	}
-
 	if calleeRoute.callgraphEnabled && r.tracker != nil {
 		r.tracker.StartExecution(name, callID, calleeExecID, time.Now())
 		defer func() {
 			r.tracker.EndExecution(name, callID, calleeExecID, time.Now())
 		}()
+
+		// Trigger prewarming after the demanded function is ready and execution is tracked.
+		if r.autoscalerEnabled && r.tracker.PrewarmEnabled() {
+			go r.prewarmDownstream(name)
+		}
 	}
 
 	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8000/fn", ip), bytes.NewBuffer(payload))
@@ -484,10 +473,6 @@ func (r *InvocationRouter) GetTracker() callgraph.Tracker {
 // prewarmDownstream triggers prewarming for downstream functions based on call graph analysis.
 // This function should be called asynchronously (fire-and-forget) to avoid adding latency to the request.
 func (r *InvocationRouter) prewarmDownstream(functionName string) {
-	r.prewarmDownstreamWithLeadOffset(functionName, 0)
-}
-
-func (r *InvocationRouter) prewarmDownstreamWithLeadOffset(functionName string, leadOffset time.Duration) {
 	targets := r.tracker.GetPrewarmTargets(functionName)
 	if len(targets) == 0 {
 		return
@@ -495,11 +480,10 @@ func (r *InvocationRouter) prewarmDownstreamWithLeadOffset(functionName string, 
 
 	r.logger.Debug("prewarming downstream functions",
 		"caller", functionName,
-		"targetCount", len(targets),
-		"leadOffset", leadOffset)
+		"targetCount", len(targets))
 
 	for _, target := range targets {
-		r.schedulePrewarmWithLeadOffset(functionName, target, leadOffset)
+		r.schedulePrewarm(functionName, target)
 	}
 }
 
@@ -507,10 +491,6 @@ func (r *InvocationRouter) prewarmDownstreamWithLeadOffset(functionName string, 
 // It calculates the delay based on lead time and cold start estimates,
 // ensuring the function is ready just in time for when it's needed.
 func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.PrewarmTarget) {
-	r.schedulePrewarmWithLeadOffset(caller, target, 0)
-}
-
-func (r *InvocationRouter) schedulePrewarmWithLeadOffset(caller string, target callgraph.PrewarmTarget, leadOffset time.Duration) {
 	// Respect per-function callgraph enablement: if target is disabled, skip prewarming it.
 	if !r.CallgraphEnabled(target.FunctionName) {
 		return
@@ -538,10 +518,10 @@ func (r *InvocationRouter) schedulePrewarmWithLeadOffset(caller string, target c
 	}
 
 	// Calculate when to trigger prewarm:
-	// delay = leadTime - coldStartTime - margin - leadOffset
+	// delay = leadTime - coldStartTime - margin
 	// We want the function to be ready *before* it's needed
 	const safetyMargin = 50 * time.Millisecond
-	delay := target.LeadTime - coldStartTime - safetyMargin - leadOffset
+	delay := target.LeadTime - coldStartTime - safetyMargin
 
 	if delay <= 0 {
 		if !r.reservePrewarm(target.FunctionName) {
@@ -553,7 +533,6 @@ func (r *InvocationRouter) schedulePrewarmWithLeadOffset(caller string, target c
 			"target", target.FunctionName,
 			"leadTime", target.LeadTime,
 			"coldStartTime", coldStartTime,
-			"leadOffset", leadOffset,
 			"delay", delay)
 		go r.executePrewarm(target.FunctionName)
 		return
@@ -569,7 +548,6 @@ func (r *InvocationRouter) schedulePrewarmWithLeadOffset(caller string, target c
 		"target", target.FunctionName,
 		"leadTime", target.LeadTime,
 		"coldStartTime", coldStartTime,
-		"leadOffset", leadOffset,
 		"delay", delay)
 
 	// Schedule the prewarm after the calculated delay

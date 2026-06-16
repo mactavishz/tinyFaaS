@@ -180,35 +180,6 @@ func TestSchedulePrewarmExecutesWhenDelayIsPositive(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
-func TestSchedulePrewarmWithLeadOffsetExecutesImmediately(t *testing.T) {
-	recorder := newPathRecorder()
-
-	tracker := newPrewarmTestTracker(t, true)
-	tracker.RecordScaleUp("test-func", time.Now(), 100*time.Millisecond, true)
-
-	r := NewInvocationRouter(nopLogger(), "development")
-	r.SetTracker(tracker)
-	r.SetScaleUpHook(func(name string, cold bool) error {
-		recorder.record("scale-up-hook")
-		return nil
-	})
-	r.routingTableMux.Lock()
-	r.routingTable["test-func"] = &Route{
-		isActive:         false,
-		callgraphEnabled: true,
-	}
-	r.routingTableMux.Unlock()
-
-	r.schedulePrewarmWithLeadOffset("caller", callgraph.PrewarmTarget{
-		FunctionName: "test-func",
-		LeadTime:     300 * time.Millisecond,
-	}, 200*time.Millisecond)
-
-	require.Eventually(t, func() bool {
-		return recorder.count("scale-up-hook") == 1
-	}, 100*time.Millisecond, 10*time.Millisecond)
-}
-
 func TestSchedulePrewarmDeduplicatesSameTarget(t *testing.T) {
 	recorder := newPathRecorder()
 
@@ -232,8 +203,8 @@ func TestSchedulePrewarmDeduplicatesSameTarget(t *testing.T) {
 		FunctionName: "test-func",
 		LeadTime:     100 * time.Millisecond,
 	}
-	r.schedulePrewarmWithLeadOffset("caller", target, 0)
-	r.schedulePrewarmWithLeadOffset("caller", target, 0)
+	r.schedulePrewarm("caller", target)
+	r.schedulePrewarm("caller", target)
 
 	require.Eventually(t, func() bool {
 		return recorder.count("scale-up-hook") == 1
@@ -326,12 +297,12 @@ func TestCallWaitsForRouteReadyAfterScaleUp(t *testing.T) {
 	assert.Equal(t, []byte("ok"), body)
 }
 
-func TestColdInvocationPrewarmsBeforeCallerScaleUpCompletes(t *testing.T) {
+func TestColdInvocationPrewarmsAfterCallerScaleUpCompletes(t *testing.T) {
 	stopRuntime := startFunctionRuntimeServer(t)
 	defer stopRuntime()
 
 	tracker := newPrewarmTestTracker(t, true)
-	seedPrewarmTarget(tracker, "caller", "target", 400*time.Millisecond, 100*time.Millisecond, 500*time.Millisecond)
+	seedPrewarmTarget(tracker, "caller", "target", 100*time.Millisecond, 500*time.Millisecond, 500*time.Millisecond)
 
 	r := NewInvocationRouter(nopLogger(), "development")
 	r.SetTracker(tracker)
@@ -393,8 +364,8 @@ func TestColdInvocationPrewarmsBeforeCallerScaleUpCompletes(t *testing.T) {
 
 	select {
 	case <-targetPrewarmed:
+		t.Fatal("did not expect target prewarm before caller scale-up was released")
 	case <-time.After(200 * time.Millisecond):
-		t.Fatal("expected target prewarm before caller scale-up was released")
 	}
 
 	close(releaseCallerScale)
@@ -408,6 +379,15 @@ func TestColdInvocationPrewarmsBeforeCallerScaleUpCompletes(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 	assert.Equal(t, http.StatusOK, status)
 	assert.Equal(t, []byte("ok"), body)
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-targetPrewarmed:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestCallFinishesRequestAfterLocalRequestBuildFailure(t *testing.T) {
