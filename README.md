@@ -201,7 +201,7 @@ You can create a file at `/etc/default/tinyfaas` with environment variable overr
 | `TINYFAAS_NATS_SUBJECT` | `faas-request` | Async invocation subject. |
 | `TINYFAAS_NATS_QUEUE_GROUP` | `faas` | Queue worker group. |
 | `TINYFAAS_QUEUE_ACK_WAIT` | `5m5s` | Queue redelivery wait for unacked messages. |
-| `TINYFAAS_QUEUE_MAX_INFLIGHT` | `8` | Maximum in-flight queued messages per worker. |
+| `TINYFAAS_QUEUE_MAX_INFLIGHT` | `1` | Maximum in-flight queued messages per worker. |
 | `ENV` | `development` | `development` enables callgraph debug endpoints. |
 | `BACKEND` | `docker` | Runtime backend. |
 | `AUTOSCALER_ENABLED` | `true` | Enable autoscaler integration. |

@@ -16,7 +16,7 @@ const (
 	DefaultSubject   = "faas-request"
 	DefaultQueue     = "faas"
 	DefaultAckWait   = 5*time.Minute + 5*time.Second
-	DefaultMaxFlight = 8
+	DefaultMaxFlight = 1
 )
 
 type Request struct {
