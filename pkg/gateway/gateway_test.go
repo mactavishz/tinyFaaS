@@ -73,3 +73,37 @@ func TestAsyncFunctionInvokeRewritesToAsyncEndpoint(t *testing.T) {
 		t.Fatalf("expected /async-invoke/echo, got %q", gotPath)
 	}
 }
+
+func TestInvokeMiddlewareSetsCallAndForwardingHeaders(t *testing.T) {
+	g := New(nopLogger())
+	var gotCallID string
+	var gotSourceIP string
+	var gotForwardedFor string
+
+	handler := g.InvokeMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		gotCallID = r.Header.Get("X-Call-Id")
+		gotSourceIP = r.Header.Get("X-Source-Ip")
+		gotForwardedFor = r.Header.Get("X-Forwarded-For")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/fn/echo", nil)
+	req.RemoteAddr = "10.0.0.2:12345"
+	req.Header.Set("X-Forwarded-For", "198.51.100.1")
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if gotCallID == "" {
+		t.Fatal("expected call id generated")
+	}
+	if gotSourceIP != "198.51.100.1" {
+		t.Fatalf("expected source ip from existing forwarded header, got %q", gotSourceIP)
+	}
+	if gotForwardedFor != "198.51.100.1, 10.0.0.2:12345" {
+		t.Fatalf("unexpected forwarded chain %q", gotForwardedFor)
+	}
+}

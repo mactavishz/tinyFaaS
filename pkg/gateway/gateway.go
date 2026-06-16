@@ -127,7 +127,7 @@ func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, targetAdd
 	// Copy headers from original request
 	proxyReq.Header = r.Header.Clone()
 
-	g.logger.Info("Forwarding request",
+	g.logger.Debug("forwarding request",
 		"method", r.Method,
 		"path", r.URL.Path,
 		"targetAddr", targetURL,
@@ -163,6 +163,7 @@ func (g *Gateway) InvokeMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		// Extract source IP and set X-Source-Ip header
 		sourceIP := g.extractSourceIP(r)
 		r.Header.Set("X-Source-Ip", sourceIP)
+		appendForwardedFor(r.Header, r.RemoteAddr)
 
 		// Generate X-Call-Id if not present
 		callID := r.Header.Get("X-Call-Id")
@@ -181,6 +182,21 @@ func (g *Gateway) InvokeMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		next(w, r)
 	}
+}
+
+func appendForwardedFor(header http.Header, remoteAddr string) {
+	remoteAddr = strings.TrimSpace(remoteAddr)
+	if remoteAddr == "" {
+		return
+	}
+
+	current := strings.TrimSpace(header.Get("X-Forwarded-For"))
+	if current == "" {
+		header.Set("X-Forwarded-For", remoteAddr)
+		return
+	}
+
+	header.Set("X-Forwarded-For", current+", "+remoteAddr)
 }
 
 // HandleFunctionInvoke handles /fn/* requests
