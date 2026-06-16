@@ -33,21 +33,13 @@ type InvocationRouter struct {
 	logger              *slog.Logger
 	// Shared HTTP client for function invocation requests
 	// Configured with connection pooling for efficient local communication
-	httpClient *http.Client
-	// Heartbeat worker: single goroutine sends batch heartbeats periodically
-	// Functions are added to pendingHeartbeats when invoked, and the worker
-	// flushes them through the configured heartbeat hook at heartbeatInterval
-	heartbeatInterval time.Duration
-	pendingHeartbeats map[string]struct{}
-	heartbeatMux      sync.Mutex
-	heartbeatStopChan chan struct{}
-	heartbeatDoneChan chan struct{}
+	httpClient      *http.Client
+	prewarmMux      sync.Mutex
+	prewarmInFlight map[string]struct{}
 
-	scaleUpHook        func(name string, cold bool) error
-	requestStartHook   func(name string) error
-	requestFinishHook  func(name string)
-	heartbeatHook      func(name string) error
-	heartbeatBatchHook func(names []string) error
+	scaleUpHook       func(name string, cold bool) error
+	requestStartHook  func(name string) error
+	requestFinishHook func(name string)
 }
 
 func (r *Route) PickIP() (string, error) {
@@ -57,13 +49,7 @@ func (r *Route) PickIP() (string, error) {
 	return r.ips[rand.Intn(len(r.ips))], nil
 }
 
-// defaultHeartbeatInterval is the interval at which the heartbeat worker sends batch heartbeats.
-// This should be significantly smaller than the autoscaler's check interval (default 10s)
-// to ensure at least 2-3 heartbeats are sent per check cycle under sustained load.
-// Using 2 seconds provides ~5 heartbeats per check cycle as a safety margin.
 const (
-	defaultHeartbeatInterval = 2 * time.Second
-
 	// After the scale-up hook returns, the invocation router may still need a brief window
 	// for route/IP state to be visible locally before invocation can proceed.
 	scaleUpRouteReadyTimeout  = 500 * time.Millisecond
@@ -97,10 +83,7 @@ func NewInvocationRouter(logger *slog.Logger, mode string) *InvocationRouter {
 		mode:                mode,
 		logger:              logger,
 		httpClient:          newHTTPClient(),
-		heartbeatInterval:   defaultHeartbeatInterval,
-		pendingHeartbeats:   make(map[string]struct{}),
-		heartbeatStopChan:   make(chan struct{}),
-		heartbeatDoneChan:   make(chan struct{}),
+		prewarmInFlight:     make(map[string]struct{}),
 	}
 }
 
@@ -127,11 +110,6 @@ func (r *InvocationRouter) SetScaleUpHook(hook func(name string, cold bool) erro
 func (r *InvocationRouter) SetRequestHooks(start func(name string) error, finish func(name string)) {
 	r.requestStartHook = start
 	r.requestFinishHook = finish
-}
-
-func (r *InvocationRouter) SetHeartbeatHooks(single func(name string) error, batch func(names []string) error) {
-	r.heartbeatHook = single
-	r.heartbeatBatchHook = batch
 }
 
 // CallgraphEnabled returns whether callgraph tracking is enabled for a given function,
@@ -172,6 +150,7 @@ func (r *InvocationRouter) Add(name string, ips []string, labels map[string]stri
 	for _, ip := range ips {
 		r.reverseRoutingTable[ip] = name
 	}
+	r.clearPrewarmReservation(name)
 	return nil
 }
 
@@ -193,6 +172,7 @@ func (r *InvocationRouter) Del(name string) error {
 
 	// Now delete from routing table
 	delete(r.routingTable, name)
+	r.clearPrewarmReservation(name)
 
 	// Clear callgraph data for deleted function
 	if r.tracker != nil {
@@ -217,6 +197,7 @@ func (r *InvocationRouter) Update(name string) error {
 	}
 	route.ips = nil
 	route.isActive = false
+	r.clearPrewarmReservation(name)
 
 	return nil
 }
@@ -288,27 +269,15 @@ func (r *InvocationRouter) invoke(name string, payload []byte, header http.Heade
 		// Generate fallback callID
 		callID = fmt.Sprintf("unknown-%s", uuid.New().String())
 	}
+	header.Set("X-Call-Id", callID)
 
 	callerExecID := header.Get("X-Exec-Id")
 	calleeExecID := uuid.New().String()
 	header.Set("X-Exec-Id", calleeExecID)
 
-	// Extract source IP to detect if this is an internal call
-	sourceIP := header.Get("X-Source-Ip")
-	caller := ""
-	if sourceIP != "" {
-		// Check if this is an internal call (from another function)
-		if callerFunc, ok := r.GetFunctionNameByIP(sourceIP); ok {
-			caller = callerFunc
-			r.logger.Debug("detected internal call",
-				"caller", caller,
-				"callee", name,
-				"callID", callID)
-		}
-	}
+	caller, callerFound, callerCallgraphEnabled := r.extractCaller(callID, callerExecID, header)
 
 	calleeRoute, ok := r.getRouteSnapshot(name)
-	callerRoute, callerRouteOK := r.getRouteSnapshot(caller)
 
 	if !ok {
 		r.logger.Error("function not found", "name", name)
@@ -316,6 +285,16 @@ func (r *InvocationRouter) invoke(name string, payload []byte, header http.Heade
 	}
 
 	r.logger.Debug("found function route", "ips", calleeRoute.ips, "active", calleeRoute.isActive)
+
+	prewarmScheduledBeforeScaleUp := false
+	if calleeRoute.callgraphEnabled && r.autoscalerEnabled && !calleeRoute.isActive && r.tracker != nil && r.tracker.PrewarmEnabled() {
+		coldStartOffset := time.Duration(0)
+		if stats, ok := r.tracker.GetFunctionStats(name); ok {
+			coldStartOffset = stats.AvgColdStartDuration
+		}
+		r.prewarmDownstreamWithLeadOffset(name, coldStartOffset)
+		prewarmScheduledBeforeScaleUp = true
+	}
 
 	// Check if function is scaled down and trigger cold start if needed
 	if r.autoscalerEnabled && !calleeRoute.isActive {
@@ -344,19 +323,12 @@ func (r *InvocationRouter) invoke(name string, payload []byte, header http.Heade
 		return http.StatusServiceUnavailable, nil
 	}
 
-	// Record the edge only after the route is confirmed ready for invocation.
-	// This avoids polluting callgraph edges with failed cold-start attempts.
-	if calleeRoute.callgraphEnabled && r.tracker != nil {
-		effectiveCaller := ""
-		// If caller's callgraph is disabled but callee is enabled, record as external (caller="")
-		if caller != "" && callerRouteOK && callerRoute.callgraphEnabled {
-			effectiveCaller = caller
-		}
-		r.tracker.RecordEdge(effectiveCaller, name, callID, callerExecID, startTime)
-	}
-
-	r.queueHeartbeat(name)
+	requestStarted := false
 	finishRequest := func() {
+		if !requestStarted {
+			return
+		}
+		requestStarted = false
 		if err := r.notifyRequestFinish(name); err != nil {
 			r.logger.Warn("failed to mark request finish", "name", name, "err", err)
 		}
@@ -366,6 +338,18 @@ func (r *InvocationRouter) invoke(name string, payload []byte, header http.Heade
 			r.logger.Error("failed to mark request start", "name", name, "err", err)
 			return http.StatusServiceUnavailable, nil
 		}
+		requestStarted = true
+		defer finishRequest()
+	}
+
+	// Record the edge only after the route is ready and the autoscaler accepts the invocation.
+	if calleeRoute.callgraphEnabled && r.tracker != nil {
+		effectiveCaller := ""
+		// If caller's callgraph is disabled but callee is enabled, record as external (caller="")
+		if caller != "" && callerFound && callerCallgraphEnabled {
+			effectiveCaller = caller
+		}
+		r.tracker.RecordEdge(effectiveCaller, name, callID, callerExecID, startTime)
 	}
 
 	// choose random handler
@@ -373,9 +357,6 @@ func (r *InvocationRouter) invoke(name string, payload []byte, header http.Heade
 
 	if err != nil {
 		r.logger.Error("failed to pick function ip", "err", err)
-		if r.autoscalerEnabled {
-			finishRequest()
-		}
 		return http.StatusInternalServerError, nil
 	}
 
@@ -383,36 +364,24 @@ func (r *InvocationRouter) invoke(name string, payload []byte, header http.Heade
 
 	// Trigger prewarming for downstream functions (fire-and-forget, non-blocking)
 	// Prewarming requires both callgraph and autoscaler to be enabled
-	if calleeRoute.callgraphEnabled && r.autoscalerEnabled && r.tracker != nil && r.tracker.PrewarmEnabled() {
+	if !prewarmScheduledBeforeScaleUp && calleeRoute.callgraphEnabled && r.autoscalerEnabled && r.tracker != nil && r.tracker.PrewarmEnabled() {
 		go r.prewarmDownstream(name)
 	}
 
-	// Mark that this function is starting execution
-	startedExecution := false
-	functionStartTime := time.Now()
 	if calleeRoute.callgraphEnabled && r.tracker != nil {
-		r.tracker.StartExecution(name, callID, calleeExecID, functionStartTime)
-		startedExecution = true
+		r.tracker.StartExecution(name, callID, calleeExecID, time.Now())
+		defer func() {
+			r.tracker.EndExecution(name, callID, calleeExecID, time.Now())
+		}()
 	}
 
 	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8000/fn", ip), bytes.NewBuffer(payload))
 	if err != nil {
 		r.logger.Error("failed to create request", "err", err)
-		if startedExecution {
-			r.tracker.EndExecution(name, callID, calleeExecID, time.Now())
-		}
-		if r.autoscalerEnabled {
-			finishRequest()
-		}
 		return http.StatusInternalServerError, nil
 	}
 
 	req.Header = header
-
-	// call function and return results
-	if r.autoscalerEnabled {
-		defer finishRequest()
-	}
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
@@ -428,12 +397,76 @@ func (r *InvocationRouter) invoke(name string, payload []byte, header http.Heade
 		return http.StatusInternalServerError, nil
 	}
 
-	// End execution - records function stats and cleans up context
-	if startedExecution {
-		r.tracker.EndExecution(name, callID, calleeExecID, time.Now())
+	return resp.StatusCode, res_body
+}
+
+func (r *InvocationRouter) extractCaller(callID string, callerExecID string, header http.Header) (string, bool, bool) {
+	if r.tracker != nil && callID != "" && callerExecID != "" {
+		if caller, ok := r.tracker.GetExecutionContextFunction(callID, callerExecID); ok {
+			return r.lookupCallerRoute(caller)
+		}
 	}
 
-	return resp.StatusCode, res_body
+	if header != nil {
+		for _, ip := range forwardedIPs(header.Get("X-Forwarded-For")) {
+			if caller, ok := r.GetFunctionNameByIP(ip); ok {
+				r.logger.Debug("detected internal call by forwarded ip", "caller", caller, "callID", callID)
+				return r.lookupCallerRoute(caller)
+			}
+		}
+
+		if caller, ok := r.GetFunctionNameByIP(header.Get("X-Source-Ip")); ok {
+			r.logger.Debug("detected internal call by source ip", "caller", caller, "callID", callID)
+			return r.lookupCallerRoute(caller)
+		}
+	}
+
+	return "", false, false
+}
+
+func (r *InvocationRouter) lookupCallerRoute(name string) (string, bool, bool) {
+	if strings.TrimSpace(name) == "" {
+		return "", false, false
+	}
+
+	if route, ok := r.getRouteSnapshot(name); ok {
+		return name, true, route.callgraphEnabled
+	}
+
+	return name, true, true
+}
+
+func forwardedIPs(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+
+	parts := strings.Split(value, ",")
+	ips := make([]string, 0, len(parts))
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip := normalizeForwardedIP(parts[i])
+		if ip != "" {
+			ips = append(ips, ip)
+		}
+	}
+	return ips
+}
+
+func normalizeForwardedIP(value string) string {
+	ip := strings.TrimSpace(value)
+	if ip == "" {
+		return ""
+	}
+
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
+
+	if strings.HasPrefix(ip, "[") && strings.HasSuffix(ip, "]") {
+		ip = strings.TrimPrefix(strings.TrimSuffix(ip, "]"), "[")
+	}
+
+	return strings.TrimSpace(ip)
 }
 
 func (r *InvocationRouter) GetFunctionNameByIP(ip string) (string, bool) {
@@ -451,6 +484,10 @@ func (r *InvocationRouter) GetTracker() callgraph.Tracker {
 // prewarmDownstream triggers prewarming for downstream functions based on call graph analysis.
 // This function should be called asynchronously (fire-and-forget) to avoid adding latency to the request.
 func (r *InvocationRouter) prewarmDownstream(functionName string) {
+	r.prewarmDownstreamWithLeadOffset(functionName, 0)
+}
+
+func (r *InvocationRouter) prewarmDownstreamWithLeadOffset(functionName string, leadOffset time.Duration) {
 	targets := r.tracker.GetPrewarmTargets(functionName)
 	if len(targets) == 0 {
 		return
@@ -458,10 +495,11 @@ func (r *InvocationRouter) prewarmDownstream(functionName string) {
 
 	r.logger.Debug("prewarming downstream functions",
 		"caller", functionName,
-		"targetCount", len(targets))
+		"targetCount", len(targets),
+		"leadOffset", leadOffset)
 
 	for _, target := range targets {
-		r.schedulePrewarm(functionName, target)
+		r.schedulePrewarmWithLeadOffset(functionName, target, leadOffset)
 	}
 }
 
@@ -469,6 +507,10 @@ func (r *InvocationRouter) prewarmDownstream(functionName string) {
 // It calculates the delay based on lead time and cold start estimates,
 // ensuring the function is ready just in time for when it's needed.
 func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.PrewarmTarget) {
+	r.schedulePrewarmWithLeadOffset(caller, target, 0)
+}
+
+func (r *InvocationRouter) schedulePrewarmWithLeadOffset(caller string, target callgraph.PrewarmTarget, leadOffset time.Duration) {
 	// Respect per-function callgraph enablement: if target is disabled, skip prewarming it.
 	if !r.CallgraphEnabled(target.FunctionName) {
 		return
@@ -488,24 +530,37 @@ func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.Prewa
 
 	// Get the estimated cold start time from function stats
 	var coldStartTime time.Duration
-	if stats, ok := r.tracker.GetFunctionStats(target.FunctionName); ok {
-		coldStartTime = stats.AvgColdStartDuration
+	if r.tracker != nil {
+		stats, ok := r.tracker.GetFunctionStats(target.FunctionName)
+		if ok {
+			coldStartTime = stats.AvgColdStartDuration
+		}
 	}
 
 	// Calculate when to trigger prewarm:
-	// delay = leadTime - coldStartTime - margin
+	// delay = leadTime - coldStartTime - margin - leadOffset
 	// We want the function to be ready *before* it's needed
 	const safetyMargin = 50 * time.Millisecond
-	delay := target.LeadTime - coldStartTime - safetyMargin
+	delay := target.LeadTime - coldStartTime - safetyMargin - leadOffset
 
 	if delay <= 0 {
+		if !r.reservePrewarm(target.FunctionName) {
+			r.logger.Debug("skipping prewarming - target already reserved", "function", target.FunctionName)
+			return
+		}
 		r.logger.Info("prewarming immediately",
 			"caller", caller,
 			"target", target.FunctionName,
 			"leadTime", target.LeadTime,
 			"coldStartTime", coldStartTime,
+			"leadOffset", leadOffset,
 			"delay", delay)
 		go r.executePrewarm(target.FunctionName)
+		return
+	}
+
+	if !r.reservePrewarm(target.FunctionName) {
+		r.logger.Debug("skipping scheduled prewarm - target already reserved", "function", target.FunctionName)
 		return
 	}
 
@@ -514,6 +569,7 @@ func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.Prewa
 		"target", target.FunctionName,
 		"leadTime", target.LeadTime,
 		"coldStartTime", coldStartTime,
+		"leadOffset", leadOffset,
 		"delay", delay)
 
 	// Schedule the prewarm after the calculated delay
@@ -527,6 +583,7 @@ func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.Prewa
 		if !stillScaledDown {
 			r.logger.Debug("skipping scheduled prewarm - function became active",
 				"function", target.FunctionName)
+			r.clearPrewarmReservation(target.FunctionName)
 			return
 		}
 
@@ -534,9 +591,27 @@ func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.Prewa
 	})
 }
 
+func (r *InvocationRouter) reservePrewarm(funcName string) bool {
+	r.prewarmMux.Lock()
+	defer r.prewarmMux.Unlock()
+
+	if _, exists := r.prewarmInFlight[funcName]; exists {
+		return false
+	}
+	r.prewarmInFlight[funcName] = struct{}{}
+	return true
+}
+
+func (r *InvocationRouter) clearPrewarmReservation(funcName string) {
+	r.prewarmMux.Lock()
+	delete(r.prewarmInFlight, funcName)
+	r.prewarmMux.Unlock()
+}
+
 // executePrewarm performs the actual prewarm operation for a function.
 func (r *InvocationRouter) executePrewarm(funcName string) {
 	if err := r.scaleUpFunction(funcName, false); err != nil {
+		r.clearPrewarmReservation(funcName)
 		r.logger.Debug("prewarm downstream function failed",
 			"function", funcName,
 			"err", err)
@@ -544,85 +619,6 @@ func (r *InvocationRouter) executePrewarm(funcName string) {
 		r.logger.Info("prewarm downstream function completed",
 			"function", funcName)
 	}
-}
-
-// queueHeartbeat adds a function to the pending heartbeat set.
-// The heartbeat worker will batch-send heartbeats for all pending functions.
-// This is a non-blocking operation that avoids spawning goroutines per-call.
-func (r *InvocationRouter) queueHeartbeat(name string) {
-	if name == "" {
-		return
-	}
-	r.heartbeatMux.Lock()
-	r.pendingHeartbeats[name] = struct{}{}
-	r.heartbeatMux.Unlock()
-}
-
-// StartHeartbeatWorker starts the background goroutine that sends batch heartbeats.
-// This should be called once when the invocation router starts.
-func (r *InvocationRouter) StartHeartbeatWorker() {
-	go r.heartbeatWorker()
-}
-
-// StopHeartbeatWorker stops the heartbeat worker gracefully.
-// This should be called during shutdown.
-func (r *InvocationRouter) StopHeartbeatWorker() {
-	close(r.heartbeatStopChan)
-	<-r.heartbeatDoneChan
-}
-
-// heartbeatWorker is the background goroutine that periodically sends batch heartbeats.
-func (r *InvocationRouter) heartbeatWorker() {
-	defer close(r.heartbeatDoneChan)
-
-	ticker := time.NewTicker(r.heartbeatInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			r.flushHeartbeats()
-		case <-r.heartbeatStopChan:
-			// Final flush before stopping
-			r.flushHeartbeats()
-			return
-		}
-	}
-}
-
-// flushHeartbeats collects all pending heartbeats and sends them in a single batch request.
-func (r *InvocationRouter) flushHeartbeats() {
-	// Collect and clear pending heartbeats atomically
-	r.heartbeatMux.Lock()
-	if len(r.pendingHeartbeats) == 0 {
-		r.heartbeatMux.Unlock()
-		return
-	}
-	functions := make([]string, 0, len(r.pendingHeartbeats))
-	for name := range r.pendingHeartbeats {
-		functions = append(functions, name)
-	}
-	// Clear the map by creating a new one (more efficient for large maps)
-	r.pendingHeartbeats = make(map[string]struct{})
-	r.heartbeatMux.Unlock()
-
-	// Send batch heartbeat
-	if err := r.sendBatchHeartbeat(functions); err != nil {
-		r.logger.Debug("failed to send batch heartbeat", "functions", functions, "err", err)
-		// Re-queue failed functions for next cycle
-		r.heartbeatMux.Lock()
-		for _, name := range functions {
-			r.pendingHeartbeats[name] = struct{}{}
-		}
-		r.heartbeatMux.Unlock()
-	}
-}
-
-func (r *InvocationRouter) sendBatchHeartbeat(functions []string) error {
-	if r.heartbeatBatchHook != nil {
-		return r.heartbeatBatchHook(functions)
-	}
-	return fmt.Errorf("heartbeat batch hook not configured")
 }
 
 // cold=true means this is a user-facing cold start

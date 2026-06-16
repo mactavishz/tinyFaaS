@@ -147,9 +147,12 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 
 	// If the function already exists, keep it serving while the replacement is prepared.
 	var oldHandler Handler
+	var oldConfig FunctionConfig
+	var hadOldConfig bool
 	ms.mux.Lock()
 	if existingHandler, ok := ms.functionHandlers[name]; ok {
 		oldHandler = existingHandler
+		oldConfig, hadOldConfig = ms.functionConfigs[name]
 	}
 	ms.mux.Unlock()
 
@@ -187,19 +190,6 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 		"function", name,
 		"duration", coldStartDuration)
 
-	if err := ms.notifyRouteAdd(name, fh.IPs(), labels); err != nil {
-		return err
-	}
-
-	// If this is a redeployment, reset callgraph stats first before recording fresh cold start
-	if oldHandler != nil {
-		ms.logger.Info("notifying callgraph tracker of reset for redeployment", "function", name)
-		ms.notifyCallgraphReset(name)
-	}
-
-	// Record scale-up data for callgraph tracking, marked as cold start since this is a new function
-	ms.notifyScaleUp(name, coldStartTime, coldStartDuration, true)
-
 	config := FunctionConfig{
 		Name:            name,
 		Env:             env,
@@ -221,6 +211,39 @@ func (ms *ManagementService) createFunction(name string, env string, replicas in
 		// overwrite registration if function already exists
 		ms.autoscaler.RegisterFunction(name, labels)
 	}
+
+	if err := ms.notifyRouteAdd(name, fh.IPs(), labels); err != nil {
+		if ms.autoscaler != nil {
+			ms.autoscaler.UnregisterFunction(name)
+			if oldHandler != nil {
+				ms.autoscaler.RegisterFunction(name, oldConfig.Labels)
+			}
+		}
+		ms.mux.Lock()
+		if oldHandler != nil {
+			ms.functionHandlers[name] = oldHandler
+			if hadOldConfig {
+				ms.functionConfigs[name] = oldConfig
+			} else {
+				delete(ms.functionConfigs, name)
+			}
+		} else {
+			delete(ms.functionHandlers, name)
+			delete(ms.functionConfigs, name)
+		}
+		ms.mux.Unlock()
+		_ = fh.Destroy()
+		return err
+	}
+
+	// If this is a redeployment, reset callgraph stats first before recording fresh cold start
+	if oldHandler != nil {
+		ms.logger.Info("notifying callgraph tracker of reset for redeployment", "function", name)
+		ms.notifyCallgraphReset(name)
+	}
+
+	// Record scale-up data for callgraph tracking, marked as cold start since this is a new function
+	ms.notifyScaleUp(name, coldStartTime, coldStartDuration, true)
 
 	// destroy the old handler if it exists
 	if oldHandler != nil {
