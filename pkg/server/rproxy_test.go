@@ -70,6 +70,33 @@ func startFunctionRuntimeServer(t *testing.T) func() {
 	}
 }
 
+func newPrewarmTestTracker(t *testing.T, prewarmEnabled bool) *callgraph.CallGraphTracker {
+	t.Helper()
+
+	config := callgraph.DefaultConfig()
+	config.Enabled = true
+	config.Prewarm.Enabled = prewarmEnabled
+
+	tracker := callgraph.New(callgraph.WithConfig(config), callgraph.WithLogger(nopLogger()))
+	tracker.Start()
+	t.Cleanup(tracker.Stop)
+	return tracker
+}
+
+func seedPrewarmTarget(tracker *callgraph.CallGraphTracker, caller string, target string, leadTime time.Duration, targetColdStart time.Duration, callerColdStart time.Duration) {
+	now := time.Now()
+	requestID := fmt.Sprintf("learn-%s-%s", caller, target)
+	executionID := fmt.Sprintf("exec-%s", caller)
+
+	tracker.RecordScaleUp(target, now, targetColdStart, true)
+	if callerColdStart > 0 {
+		tracker.RecordScaleUp(caller, now, callerColdStart, true)
+	}
+	tracker.StartExecution(caller, requestID, executionID, now)
+	tracker.RecordEdge(caller, target, requestID, executionID, now.Add(leadTime))
+	tracker.EndExecution(caller, requestID, executionID, now.Add(leadTime+time.Millisecond))
+}
+
 func TestScaleUpFunctionReturnsError(t *testing.T) {
 	t.Run("missing hook", func(t *testing.T) {
 		r := NewInvocationRouter(nopLogger(), "development")
@@ -153,6 +180,68 @@ func TestSchedulePrewarmExecutesWhenDelayIsPositive(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+func TestSchedulePrewarmWithLeadOffsetExecutesImmediately(t *testing.T) {
+	recorder := newPathRecorder()
+
+	tracker := newPrewarmTestTracker(t, true)
+	tracker.RecordScaleUp("test-func", time.Now(), 100*time.Millisecond, true)
+
+	r := NewInvocationRouter(nopLogger(), "development")
+	r.SetTracker(tracker)
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		recorder.record("scale-up-hook")
+		return nil
+	})
+	r.routingTableMux.Lock()
+	r.routingTable["test-func"] = &Route{
+		isActive:         false,
+		callgraphEnabled: true,
+	}
+	r.routingTableMux.Unlock()
+
+	r.schedulePrewarmWithLeadOffset("caller", callgraph.PrewarmTarget{
+		FunctionName: "test-func",
+		LeadTime:     300 * time.Millisecond,
+	}, 200*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		return recorder.count("scale-up-hook") == 1
+	}, 100*time.Millisecond, 10*time.Millisecond)
+}
+
+func TestSchedulePrewarmDeduplicatesSameTarget(t *testing.T) {
+	recorder := newPathRecorder()
+
+	tracker := newPrewarmTestTracker(t, true)
+	tracker.RecordScaleUp("test-func", time.Now(), 500*time.Millisecond, true)
+
+	r := NewInvocationRouter(nopLogger(), "development")
+	r.SetTracker(tracker)
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		recorder.record("scale-up-hook")
+		return nil
+	})
+	r.routingTableMux.Lock()
+	r.routingTable["test-func"] = &Route{
+		isActive:         false,
+		callgraphEnabled: true,
+	}
+	r.routingTableMux.Unlock()
+
+	target := callgraph.PrewarmTarget{
+		FunctionName: "test-func",
+		LeadTime:     100 * time.Millisecond,
+	}
+	r.schedulePrewarmWithLeadOffset("caller", target, 0)
+	r.schedulePrewarmWithLeadOffset("caller", target, 0)
+
+	require.Eventually(t, func() bool {
+		return recorder.count("scale-up-hook") == 1
+	}, time.Second, 10*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, 1, recorder.count("scale-up-hook"))
+}
+
 func TestCallReturns503WhenColdStartTriggerFails(t *testing.T) {
 	tracker := callgraph.New(callgraph.WithLogger(nopLogger()))
 	tracker.Start()
@@ -164,6 +253,7 @@ func TestCallReturns503WhenColdStartTriggerFails(t *testing.T) {
 	r.SetScaleUpHook(func(name string, cold bool) error {
 		return fmt.Errorf("scale-up failed")
 	})
+	r.SetRequestHooks(func(name string) error { return nil }, func(name string) {})
 
 	r.routingTableMux.Lock()
 	r.routingTable["test-func"] = &Route{
@@ -176,7 +266,10 @@ func TestCallReturns503WhenColdStartTriggerFails(t *testing.T) {
 	status, body := r.Call("test-func", []byte("{}"), false, http.Header{"X-Call-Id": []string{"req-coldstart-fail"}})
 	assert.Equal(t, http.StatusServiceUnavailable, status)
 	assert.Nil(t, body)
-	assert.Equal(t, 0, tracker.EdgeCount())
+	assert.Equal(t, 1, tracker.EdgeCount())
+	stats, ok := tracker.GetFunctionStats("test-func")
+	require.True(t, ok)
+	assert.Equal(t, 1, stats.TotalCalls)
 }
 
 func TestCallWaitsForRouteReadyAfterScaleUp(t *testing.T) {
@@ -209,6 +302,220 @@ func TestCallWaitsForRouteReadyAfterScaleUp(t *testing.T) {
 	status, body := r.Call("test-func", []byte("{}"), false, http.Header{"X-Call-Id": []string{"req-route-sync"}})
 	assert.Equal(t, http.StatusOK, status)
 	assert.Equal(t, []byte("ok"), body)
+}
+
+func TestColdInvocationStartsExecutionAndPrewarmsBeforeCallerScaleUpCompletes(t *testing.T) {
+	stopRuntime := startFunctionRuntimeServer(t)
+	defer stopRuntime()
+
+	tracker := newPrewarmTestTracker(t, true)
+	seedPrewarmTarget(tracker, "caller", "target", 400*time.Millisecond, 100*time.Millisecond, 500*time.Millisecond)
+
+	r := NewInvocationRouter(nopLogger(), "development")
+	r.SetTracker(tracker)
+	r.SetAutoScalerEnabled(true)
+	r.SetRequestHooks(func(name string) error { return nil }, func(name string) {})
+
+	callerScaleEntered := make(chan struct{})
+	releaseCallerScale := make(chan struct{})
+	targetPrewarmed := make(chan struct{}, 1)
+
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		switch name {
+		case "caller":
+			close(callerScaleEntered)
+			<-releaseCallerScale
+			r.routingTableMux.Lock()
+			r.routingTable["caller"] = &Route{
+				ips:              []string{"127.0.0.1"},
+				isActive:         true,
+				callgraphEnabled: true,
+			}
+			r.routingTableMux.Unlock()
+		case "target":
+			require.False(t, cold)
+			targetPrewarmed <- struct{}{}
+		default:
+			t.Fatalf("unexpected scale-up for %s", name)
+		}
+		return nil
+	})
+
+	r.routingTableMux.Lock()
+	r.routingTable["caller"] = &Route{
+		isActive:         false,
+		callgraphEnabled: true,
+	}
+	r.routingTable["target"] = &Route{
+		isActive:         false,
+		callgraphEnabled: true,
+	}
+	r.routingTableMux.Unlock()
+
+	header := http.Header{"X-Call-Id": []string{"req-cold-prewarm"}}
+	done := make(chan struct{})
+	var status int
+	var body []byte
+	go func() {
+		status, body = r.Call("caller", []byte("{}"), false, header)
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-callerScaleEntered:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	select {
+	case <-targetPrewarmed:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected target prewarm before caller scale-up was released")
+	}
+
+	executionID := header.Get("X-Exec-Id")
+	require.NotEmpty(t, executionID)
+	functionName, ok := tracker.GetExecutionContextFunction("req-cold-prewarm", executionID)
+	require.True(t, ok)
+	assert.Equal(t, "caller", functionName)
+
+	close(releaseCallerScale)
+	require.Eventually(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, []byte("ok"), body)
+}
+
+func TestActiveCallerUsesZeroLeadOffsetForPrewarm(t *testing.T) {
+	stopRuntime := startFunctionRuntimeServer(t)
+	defer stopRuntime()
+
+	tracker := newPrewarmTestTracker(t, true)
+	seedPrewarmTarget(tracker, "caller", "target", 220*time.Millisecond, 100*time.Millisecond, 500*time.Millisecond)
+
+	r := NewInvocationRouter(nopLogger(), "development")
+	r.SetTracker(tracker)
+	r.SetAutoScalerEnabled(true)
+	r.SetRequestHooks(func(name string) error { return nil }, func(name string) {})
+
+	targetPrewarmed := make(chan struct{}, 1)
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		if name == "target" {
+			targetPrewarmed <- struct{}{}
+			return nil
+		}
+		t.Fatalf("unexpected scale-up for %s", name)
+		return nil
+	})
+
+	r.routingTableMux.Lock()
+	r.routingTable["caller"] = &Route{
+		ips:              []string{"127.0.0.1"},
+		isActive:         true,
+		callgraphEnabled: true,
+	}
+	r.routingTable["target"] = &Route{
+		isActive:         false,
+		callgraphEnabled: true,
+	}
+	r.routingTableMux.Unlock()
+
+	status, body := r.Call("caller", []byte("{}"), false, http.Header{"X-Call-Id": []string{"req-active-zero-offset"}})
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, []byte("ok"), body)
+
+	select {
+	case <-targetPrewarmed:
+		t.Fatal("expected active caller prewarm to use normal delayed scheduling")
+	case <-time.After(40 * time.Millisecond):
+	}
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-targetPrewarmed:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestColdInvocationDoesNotPrewarmWhenPrewarmDisabled(t *testing.T) {
+	tracker := newPrewarmTestTracker(t, false)
+	seedPrewarmTarget(tracker, "caller", "target", 400*time.Millisecond, 100*time.Millisecond, 500*time.Millisecond)
+
+	r := NewInvocationRouter(nopLogger(), "development")
+	r.SetTracker(tracker)
+	r.SetAutoScalerEnabled(true)
+	r.SetRequestHooks(func(name string) error { return nil }, func(name string) {})
+
+	callerScaleEntered := make(chan struct{})
+	releaseCallerScale := make(chan struct{})
+	targetPrewarmed := make(chan struct{}, 1)
+
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		switch name {
+		case "caller":
+			close(callerScaleEntered)
+			<-releaseCallerScale
+		case "target":
+			targetPrewarmed <- struct{}{}
+		default:
+			t.Fatalf("unexpected scale-up for %s", name)
+		}
+		return nil
+	})
+
+	r.routingTableMux.Lock()
+	r.routingTable["caller"] = &Route{
+		isActive:         false,
+		callgraphEnabled: true,
+	}
+	r.routingTable["target"] = &Route{
+		isActive:         false,
+		callgraphEnabled: true,
+	}
+	r.routingTableMux.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = r.Call("caller", []byte("{}"), false, http.Header{"X-Call-Id": []string{"req-prewarm-disabled"}})
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-callerScaleEntered:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	select {
+	case <-targetPrewarmed:
+		t.Fatal("did not expect target prewarm when prewarm is disabled")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseCallerScale)
+	require.Eventually(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestCallFinishesRequestAfterLocalRequestBuildFailure(t *testing.T) {
