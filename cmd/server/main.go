@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"log/slog"
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/docker"
 	"github.com/OpenFogStack/tinyFaaS/pkg/queue"
@@ -20,7 +23,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
 	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/callgraph"
-	"log/slog"
 )
 
 const (
@@ -63,6 +65,7 @@ func main() {
 	}
 
 	rp := tinyserver.NewInvocationRouter(logger, mode)
+	rp.SetPrewarmTuning(prewarmTuningFromEnv(logger, rp.PrewarmTuning()))
 
 	callGraphConfig, err := callgraph.NewConfigFromEnv("tinyfaas")
 	if err != nil {
@@ -176,6 +179,51 @@ func newPublisherWithRetry(config queue.NATSConfig, logger *slog.Logger, attempt
 	return nil, lastErr
 }
 
+// prewarmTuningFromEnv overlays env-based overrides on top of defaults so the
+// server can be tuned without rebuilds.
+//
+// TINYFAAS_PREWARM_CONCURRENCY     - max concurrent prewarms; 0 disables cap.
+// TINYFAAS_PREWARM_PER_CALL_LIMIT  - max prewarms scheduled per caller invocation.
+// TINYFAAS_PREWARM_MIN_SAVINGS_MS  - minimum expected savings to schedule a prewarm.
+// TINYFAAS_PREWARM_SAFETY_MARGIN_MS - safety margin subtracted from lead time.
+func prewarmTuningFromEnv(logger *slog.Logger, base tinyserver.PrewarmTuning) tinyserver.PrewarmTuning {
+	tuning := base
+	if raw := strings.TrimSpace(os.Getenv("TINYFAAS_PREWARM_CONCURRENCY")); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v >= 0 {
+			tuning.Concurrency = v
+		} else {
+			logger.Warn("invalid TINYFAAS_PREWARM_CONCURRENCY", "value", raw, "err", err)
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("TINYFAAS_PREWARM_PER_CALL_LIMIT")); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v >= 0 {
+			tuning.PerCallLimit = v
+		} else {
+			logger.Warn("invalid TINYFAAS_PREWARM_PER_CALL_LIMIT", "value", raw, "err", err)
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("TINYFAAS_PREWARM_MIN_SAVINGS_MS")); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v >= 0 {
+			tuning.MinSavings = time.Duration(v) * time.Millisecond
+		} else {
+			logger.Warn("invalid TINYFAAS_PREWARM_MIN_SAVINGS_MS", "value", raw, "err", err)
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("TINYFAAS_PREWARM_SAFETY_MARGIN_MS")); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v >= 0 {
+			tuning.SafetyMargin = time.Duration(v) * time.Millisecond
+		} else {
+			logger.Warn("invalid TINYFAAS_PREWARM_SAFETY_MARGIN_MS", "value", raw, "err", err)
+		}
+	}
+	logger.Info("prewarm tuning",
+		"concurrency", tuning.Concurrency,
+		"per_call_limit", tuning.PerCallLimit,
+		"min_savings", tuning.MinSavings,
+		"safety_margin", tuning.SafetyMargin)
+	return tuning
+}
+
 func (s *service) register(mux *http.ServeMux) {
 	mux.HandleFunc("/upload", s.uploadHandler)
 	mux.HandleFunc("/delete", s.deleteHandler)
@@ -186,10 +234,60 @@ func (s *service) register(mux *http.ServeMux) {
 	mux.HandleFunc("/uploadURL", s.urlUploadHandler)
 	mux.HandleFunc("/invoke/", s.invokeHandler)
 	mux.HandleFunc("/async-invoke/", s.asyncInvokeHandler)
+	mux.HandleFunc("/scale-up/", s.scaleUpHandler)
 	mux.HandleFunc("/callgraph", s.callgraphHandler)
 	mux.HandleFunc("/callgraph/function/", s.callgraphFunctionHandler)
 	mux.HandleFunc("/callgraph/edge", s.callgraphEdgeHandler)
 	mux.HandleFunc("/stats/function/", s.functionStatsHandler)
+}
+
+// scaleUpHandler implements gateway-driven scale-from-zero.
+//
+// The gateway uses singleflight to dedupe concurrent calls and routes demand
+// invocations through this endpoint before forwarding to /invoke/. By the time
+// /invoke/ runs, the route is active, which:
+//
+//   - lets prewarm goroutines win the autoscaler claim race when they fire
+//     during the caller's runtime startup, and
+//   - keeps the rproxy demand-cold path as a fallback for direct /invoke/
+//     callers (testing, queue worker if not routed via gateway).
+//
+// Response semantics:
+//
+//	200 OK              function exists and is (or is now) ready to serve.
+//	                    When the autoscaler is disabled, this is purely an
+//	                    existence check: functions never scale down so the
+//	                    gateway can forward immediately.
+//	404 Not Found       function does not exist.
+//	503 Service Unavail scale-up failed; gateway returns 502/503 to caller.
+func (s *service) scaleUpHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "invalid method", http.StatusMethodNotAllowed)
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/scale-up/")
+	if name == "" {
+		http.Error(w, "function name required", http.StatusBadRequest)
+		return
+	}
+	if _, ok := s.ms.Get(name); !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	// When the autoscaler is disabled, functions stay running after deploy
+	// and never scale down, so /scale-up is a no-op aside from the existence
+	// check above. Returning 200 lets the gateway forward immediately
+	// instead of bubbling up an "autoscaler not enabled" error.
+	if s.autoscale == nil || !s.autoscale.IsEnabled() {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if err := s.ms.ScaleUp(name, true); err != nil {
+		s.logger.Error("scale-up failed", "function", name, "err", err)
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *service) uploadHandler(w http.ResponseWriter, r *http.Request) {

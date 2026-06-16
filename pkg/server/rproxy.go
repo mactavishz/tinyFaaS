@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,38 @@ type Route struct {
 	callgraphEnabled bool
 }
 
+// EdgeKindHeader is propagated by the gateway/queue worker to tell the router
+// whether the caller invoked the callee synchronously (/fn/) or asynchronously
+// (/async-fn/). It feeds the prewarm scheduler so async edges are deprioritised.
+const EdgeKindHeader = "X-Tinyfaas-Edge-Kind"
+
+// PrewarmTuning controls how the invocation router schedules prewarms.
+type PrewarmTuning struct {
+	// Concurrency caps how many prewarm scale-ups may run at the same time.
+	// Demand cold starts always bypass this cap.
+	Concurrency int
+	// PerCallLimit caps how many prewarms a single caller invocation may schedule.
+	// Targets are sorted by priority (sync first, then expected savings) and the
+	// first PerCallLimit are scheduled; the rest are dropped.
+	PerCallLimit int
+	// MinSavings is the minimum expected savings a prewarm target must offer
+	// to be considered. Targets with savings below this are skipped.
+	MinSavings time.Duration
+	// SafetyMargin is subtracted from the lead time when computing the prewarm
+	// firing delay so the callee is ready slightly before it's needed.
+	SafetyMargin time.Duration
+}
+
+// DefaultPrewarmTuning returns reasonable defaults
+func DefaultPrewarmTuning() PrewarmTuning {
+	return PrewarmTuning{
+		Concurrency:  2,
+		PerCallLimit: 2,
+		MinSavings:   100 * time.Millisecond,
+		SafetyMargin: 50 * time.Millisecond,
+	}
+}
+
 type InvocationRouter struct {
 	routingTable        map[string]*Route
 	reverseRoutingTable map[string]string
@@ -36,6 +69,11 @@ type InvocationRouter struct {
 	httpClient      *http.Client
 	prewarmMux      sync.Mutex
 	prewarmInFlight map[string]struct{}
+	// prewarmSemaphore caps concurrent prewarm scale-ups (demand bypasses).
+	// nil disables the cap. Non-nil with capacity N admits at most N
+	// in-flight executePrewarm calls; the rest are dropped non-blockingly.
+	prewarmSemaphore chan struct{}
+	prewarmTuning    PrewarmTuning
 
 	scaleUpHook       func(name string, cold bool) error
 	requestStartHook  func(name string) error
@@ -77,14 +115,42 @@ func newHTTPClient() *http.Client {
 }
 
 func NewInvocationRouter(logger *slog.Logger, mode string) *InvocationRouter {
-	return &InvocationRouter{
+	tuning := DefaultPrewarmTuning()
+	r := &InvocationRouter{
 		routingTable:        make(map[string]*Route),
 		reverseRoutingTable: make(map[string]string),
 		mode:                mode,
 		logger:              logger,
 		httpClient:          newHTTPClient(),
 		prewarmInFlight:     make(map[string]struct{}),
+		prewarmTuning:       tuning,
 	}
+	if tuning.Concurrency > 0 {
+		r.prewarmSemaphore = make(chan struct{}, tuning.Concurrency)
+	}
+	return r
+}
+
+// SetPrewarmTuning replaces the prewarm scheduling parameters. The semaphore
+// is rebuilt to match the new concurrency cap. Calling this while prewarms are
+// in-flight is safe but in-flight goroutines will continue to use the old
+// semaphore until they release it; subsequent prewarms see the new cap.
+func (r *InvocationRouter) SetPrewarmTuning(tuning PrewarmTuning) {
+	r.prewarmMux.Lock()
+	defer r.prewarmMux.Unlock()
+	r.prewarmTuning = tuning
+	if tuning.Concurrency > 0 {
+		r.prewarmSemaphore = make(chan struct{}, tuning.Concurrency)
+	} else {
+		r.prewarmSemaphore = nil
+	}
+}
+
+// PrewarmTuning returns the current scheduling parameters.
+func (r *InvocationRouter) PrewarmTuning() PrewarmTuning {
+	r.prewarmMux.Lock()
+	defer r.prewarmMux.Unlock()
+	return r.prewarmTuning
 }
 
 func (r *InvocationRouter) IsDev() bool {
@@ -339,7 +405,12 @@ func (r *InvocationRouter) invoke(name string, payload []byte, header http.Heade
 		if caller != "" && callerFound && callerCallgraphEnabled {
 			effectiveCaller = caller
 		}
-		r.tracker.RecordEdge(effectiveCaller, name, callID, callerExecID, startTime)
+		// Edge kind is propagated by the gateway / queue worker via header.
+		// Sync edges (/fn/) appear on the caller's critical path; async edges
+		// (/async-fn/) do not. The prewarm scheduler uses this to deprioritise
+		// async fan-out that does not contribute to user-visible latency.
+		edgeKind := callgraph.ParseEdgeKind(strings.TrimSpace(header.Get(EdgeKindHeader)))
+		r.tracker.RecordEdgeWithKind(effectiveCaller, name, callID, callerExecID, startTime, edgeKind)
 	}
 
 	// choose random handler
@@ -472,19 +543,112 @@ func (r *InvocationRouter) GetTracker() callgraph.Tracker {
 
 // prewarmDownstream triggers prewarming for downstream functions based on call graph analysis.
 // This function should be called asynchronously (fire-and-forget) to avoid adding latency to the request.
+//
+// The scheduler runs in three stages despite Docker's higher per-cold-start cost:
+//
+//  1. Filter out targets with insufficient expected savings or no useful data.
+//  2. Sort by priority: sync edges first (they sit on user-visible latency),
+//     then by expected savings descending.
+//  3. Take the top PerCallLimit targets and dispatch them. Concurrent prewarms
+//     are further capped by a semaphore inside executePrewarm.
 func (r *InvocationRouter) prewarmDownstream(functionName string) {
-	targets := r.tracker.GetPrewarmTargets(functionName)
-	if len(targets) == 0 {
+	if r.tracker == nil {
+		return
+	}
+
+	tuning := r.PrewarmTuning()
+	rawTargets := r.tracker.GetPrewarmTargets(functionName)
+	candidates := r.filterAndRankPrewarmTargets(rawTargets, tuning)
+	if len(candidates) == 0 {
 		return
 	}
 
 	r.logger.Debug("prewarming downstream functions",
 		"caller", functionName,
-		"targetCount", len(targets))
+		"raw", len(rawTargets),
+		"selected", len(candidates))
 
-	for _, target := range targets {
+	for _, target := range candidates {
 		r.schedulePrewarm(functionName, target)
 	}
+}
+
+// rankedPrewarmTarget pairs a callgraph target with its computed scheduling
+// metadata so we don't have to recompute it during sorting.
+type rankedPrewarmTarget struct {
+	target   callgraph.PrewarmTarget
+	savings  time.Duration
+	syncEdge bool
+}
+
+// filterAndRankPrewarmTargets applies the savings filter, sorts targets so that
+// sync edges with the highest expected savings come first, and trims to the
+// per-call budget. Returns the trimmed PrewarmTarget slice in dispatch order.
+func (r *InvocationRouter) filterAndRankPrewarmTargets(targets []callgraph.PrewarmTarget, tuning PrewarmTuning) []callgraph.PrewarmTarget {
+	if len(targets) == 0 {
+		return nil
+	}
+
+	ranked := make([]rankedPrewarmTarget, 0, len(targets))
+	for _, t := range targets {
+		// Drop targets without cold-start data (we cannot estimate savings).
+		if t.AvgColdStartDuration <= 0 {
+			continue
+		}
+		if t.LeadTime <= 0 {
+			continue
+		}
+
+		// Expected savings = how much the caller could save vs a fresh cold
+		// start, assuming prewarm fires when the caller starts executing and
+		// runs in parallel with the caller's prior work.
+		//
+		//   savings = min(coldStart, leadTime - margin)
+		//
+		// If lead time is shorter than cold start, prewarm cannot complete in
+		// time, so savings = leadTime. Subtract a safety margin so we don't
+		// schedule prewarms that only buy a few milliseconds.
+		usableLead := t.LeadTime - tuning.SafetyMargin
+		if usableLead <= 0 {
+			continue
+		}
+		savings := t.AvgColdStartDuration
+		if usableLead < savings {
+			savings = usableLead
+		}
+		if savings < tuning.MinSavings {
+			continue
+		}
+
+		ranked = append(ranked, rankedPrewarmTarget{
+			target:   t,
+			savings:  savings,
+			syncEdge: t.Kind == callgraph.EdgeKindSync,
+		})
+	}
+
+	// Stable sort: sync first, then by expected savings descending, then by
+	// function name for determinism.
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].syncEdge != ranked[j].syncEdge {
+			return ranked[i].syncEdge
+		}
+		if ranked[i].savings != ranked[j].savings {
+			return ranked[i].savings > ranked[j].savings
+		}
+		return ranked[i].target.FunctionName < ranked[j].target.FunctionName
+	})
+
+	limit := tuning.PerCallLimit
+	if limit > 0 && len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+
+	out := make([]callgraph.PrewarmTarget, 0, len(ranked))
+	for _, rt := range ranked {
+		out = append(out, rt.target)
+	}
+	return out
 }
 
 // schedulePrewarm schedules a prewarm operation for a target function.
@@ -509,8 +673,8 @@ func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.Prewa
 	}
 
 	// Get the estimated cold start time from function stats
-	var coldStartTime time.Duration
-	if r.tracker != nil {
+	coldStartTime := target.AvgColdStartDuration
+	if coldStartTime == 0 && r.tracker != nil {
 		stats, ok := r.tracker.GetFunctionStats(target.FunctionName)
 		if ok {
 			coldStartTime = stats.AvgColdStartDuration
@@ -520,8 +684,8 @@ func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.Prewa
 	// Calculate when to trigger prewarm:
 	// delay = leadTime - coldStartTime - margin
 	// We want the function to be ready *before* it's needed
-	const safetyMargin = 50 * time.Millisecond
-	delay := target.LeadTime - coldStartTime - safetyMargin
+	tuning := r.PrewarmTuning()
+	delay := target.LeadTime - coldStartTime - tuning.SafetyMargin
 
 	if delay <= 0 {
 		if !r.reservePrewarm(target.FunctionName) {
@@ -531,6 +695,7 @@ func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.Prewa
 		r.logger.Info("prewarming immediately",
 			"caller", caller,
 			"target", target.FunctionName,
+			"kind", target.Kind,
 			"leadTime", target.LeadTime,
 			"coldStartTime", coldStartTime,
 			"delay", delay)
@@ -546,6 +711,7 @@ func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.Prewa
 	r.logger.Info("scheduling prewarm",
 		"caller", caller,
 		"target", target.FunctionName,
+		"kind", target.Kind,
 		"leadTime", target.LeadTime,
 		"coldStartTime", coldStartTime,
 		"delay", delay)
@@ -587,7 +753,27 @@ func (r *InvocationRouter) clearPrewarmReservation(funcName string) {
 }
 
 // executePrewarm performs the actual prewarm operation for a function.
+// Acquires the global prewarm semaphore non-blockingly so a backlog of
+// prewarms cannot stall iterations or pile up Docker container creates.
+// If the budget is exhausted, the prewarm is dropped and the reservation
+// cleared so a future iteration can retry.
 func (r *InvocationRouter) executePrewarm(funcName string) {
+	r.prewarmMux.Lock()
+	sem := r.prewarmSemaphore
+	r.prewarmMux.Unlock()
+
+	if sem != nil {
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+		default:
+			r.logger.Debug("prewarm budget exhausted, skipping",
+				"function", funcName)
+			r.clearPrewarmReservation(funcName)
+			return
+		}
+	}
+
 	if err := r.scaleUpFunction(funcName, false); err != nil {
 		r.clearPrewarmReservation(funcName)
 		r.logger.Debug("prewarm downstream function failed",

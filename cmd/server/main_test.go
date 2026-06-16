@@ -162,3 +162,35 @@ func TestAsyncInvokePublishFailureReturns503(t *testing.T) {
 		t.Fatalf("expected 503, got %d", rec.Code)
 	}
 }
+
+// TestScaleUpHandlerNoOpWhenAutoscalerDisabled verifies that POST /scale-up
+// returns 200 even when the autoscaler is disabled. In that mode functions
+// stay running after deploy, so the gateway scaling middleware can use the
+// same code path without bubbling up an "autoscaler not enabled" error.
+func TestScaleUpHandlerNoOpWhenAutoscalerDisabled(t *testing.T) {
+	publisher := &recordingPublisher{}
+	s := newAsyncTestService(t, publisher)
+	// s.autoscale is left nil: existing function exists, autoscaler off.
+
+	req := httptest.NewRequest(http.MethodPost, "/scale-up/echo", nil)
+	rec := httptest.NewRecorder()
+	s.scaleUpHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestScaleUpHandlerReturns404ForMissingFunction makes sure the gateway can
+// surface 404 to the caller without ever invoking ms.ScaleUp on an unknown
+// function name.
+func TestScaleUpHandlerReturns404ForMissingFunction(t *testing.T) {
+	publisher := &recordingPublisher{}
+	s := newAsyncTestService(t, publisher)
+
+	req := httptest.NewRequest(http.MethodPost, "/scale-up/missing", nil)
+	rec := httptest.NewRecorder()
+	s.scaleUpHandler(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}

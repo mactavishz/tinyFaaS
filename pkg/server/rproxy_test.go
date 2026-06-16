@@ -302,7 +302,10 @@ func TestColdInvocationPrewarmsAfterCallerScaleUpCompletes(t *testing.T) {
 	defer stopRuntime()
 
 	tracker := newPrewarmTestTracker(t, true)
-	seedPrewarmTarget(tracker, "caller", "target", 100*time.Millisecond, 500*time.Millisecond, 500*time.Millisecond)
+	// Lead time must clear the prewarm savings filter (default min 100ms +
+	// safety margin 50ms). 600ms gives plenty of room while keeping the test
+	// fast.
+	seedPrewarmTarget(tracker, "caller", "target", 600*time.Millisecond, 500*time.Millisecond, 500*time.Millisecond)
 
 	r := NewInvocationRouter(nopLogger(), "development")
 	r.SetTracker(tracker)
@@ -688,4 +691,140 @@ func TestUpdateDeactivatesRouteIdempotently(t *testing.T) {
 	require.NotNil(t, route)
 	assert.False(t, route.isActive)
 	assert.Empty(t, route.ips)
+}
+
+// TestFilterAndRankPrewarmTargets verifies the savings filter, sync-first
+// ordering, and per-call budget that mirrors faasd's behaviour while keeping
+// Docker daemon contention bounded.
+func TestFilterAndRankPrewarmTargets(t *testing.T) {
+	r := NewInvocationRouter(nopLogger(), "development")
+	tuning := PrewarmTuning{
+		Concurrency:  2,
+		PerCallLimit: 2,
+		MinSavings:   100 * time.Millisecond,
+		SafetyMargin: 50 * time.Millisecond,
+	}
+
+	targets := []callgraph.PrewarmTarget{
+		{
+			// Sync, healthy savings: keep, rank top.
+			FunctionName:         "se",
+			LeadTime:             800 * time.Millisecond,
+			AvgColdStartDuration: 600 * time.Millisecond,
+			Kind:                 callgraph.EdgeKindSync,
+		},
+		{
+			// Sync, savings below threshold (lead too short): drop.
+			FunctionName:         "cw",
+			LeadTime:             60 * time.Millisecond,
+			AvgColdStartDuration: 600 * time.Millisecond,
+			Kind:                 callgraph.EdgeKindSync,
+		},
+		{
+			// Async, large savings: keep but ranked below sync.
+			FunctionName:         "ct",
+			LeadTime:             3000 * time.Millisecond,
+			AvgColdStartDuration: 800 * time.Millisecond,
+			Kind:                 callgraph.EdgeKindAsync,
+		},
+		{
+			// Async, also large: would be kept but trimmed by per-call limit.
+			FunctionName:         "cs",
+			LeadTime:             3000 * time.Millisecond,
+			AvgColdStartDuration: 800 * time.Millisecond,
+			Kind:                 callgraph.EdgeKindAsync,
+		},
+		{
+			// No cold start data: drop.
+			FunctionName:         "no-data",
+			LeadTime:             1000 * time.Millisecond,
+			AvgColdStartDuration: 0,
+			Kind:                 callgraph.EdgeKindSync,
+		},
+	}
+
+	got := r.filterAndRankPrewarmTargets(targets, tuning)
+	require.Len(t, got, 2, "expected per-call limit to trim to 2 targets")
+	assert.Equal(t, "se", got[0].FunctionName, "sync target with biggest savings should rank first")
+	assert.Equal(t, callgraph.EdgeKindSync, got[0].Kind)
+	// Second slot goes to whichever async target sorted highest by savings then name.
+	assert.Equal(t, callgraph.EdgeKindAsync, got[1].Kind, "remaining slot should be async")
+}
+
+// TestPrewarmConcurrencyCapDropsExcessExecutions verifies the global semaphore
+// drops prewarms beyond the configured concurrency cap so a burst cannot
+// pile up Docker daemon work.
+func TestPrewarmConcurrencyCapDropsExcessExecutions(t *testing.T) {
+	r := NewInvocationRouter(nopLogger(), "development")
+	r.SetPrewarmTuning(PrewarmTuning{
+		Concurrency:  1,
+		PerCallLimit: 5,
+		MinSavings:   0,
+		SafetyMargin: 50 * time.Millisecond,
+	})
+
+	release := make(chan struct{})
+	executed := make(chan string, 5)
+
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		executed <- name
+		<-release
+		return nil
+	})
+
+	// Reserve up front so executePrewarm doesn't reject via the per-target
+	// reservation map, then run executePrewarm directly to exercise the
+	// concurrency cap.
+	for _, fn := range []string{"a", "b", "c"} {
+		require.True(t, r.reservePrewarm(fn))
+	}
+
+	go r.executePrewarm("a")
+	require.Eventually(t, func() bool {
+		return len(executed) == 1
+	}, time.Second, 10*time.Millisecond, "first prewarm should acquire the semaphore")
+
+	// The next two should be dropped because the semaphore is full.
+	r.executePrewarm("b")
+	r.executePrewarm("c")
+	assert.Equal(t, 1, len(executed), "second and third prewarms should be dropped, not queued")
+
+	close(release)
+	require.Eventually(t, func() bool {
+		return len(executed) == 1
+	}, time.Second, 10*time.Millisecond)
+}
+
+// TestEdgeKindHeaderPropagatedToTracker verifies the rproxy reads the
+// X-Tinyfaas-Edge-Kind header set by the gateway and tags the recorded edge
+// accordingly. This is what enables sync/async-aware prewarm scheduling.
+func TestEdgeKindHeaderPropagatedToTracker(t *testing.T) {
+	stopRuntime := startFunctionRuntimeServer(t)
+	defer stopRuntime()
+
+	tracker := callgraph.New(callgraph.WithLogger(nopLogger()))
+	tracker.Start()
+	defer tracker.Stop()
+
+	r := NewInvocationRouter(nopLogger(), "development")
+	r.SetTracker(tracker)
+
+	r.routingTableMux.Lock()
+	r.routingTable["test-func"] = &Route{
+		ips:              []string{"127.0.0.1"},
+		isActive:         true,
+		callgraphEnabled: true,
+	}
+	r.routingTableMux.Unlock()
+
+	hdr := http.Header{
+		"X-Call-Id":          []string{"req-edge-kind-async"},
+		"X-Tinyfaas-Edge-Kind": []string{"async"},
+	}
+	status, _ := r.Call("test-func", []byte("{}"), false, hdr)
+	require.Equal(t, http.StatusOK, status)
+
+	edge, ok := tracker.GetEdgeStats("", "test-func")
+	require.True(t, ok)
+	assert.Equal(t, callgraph.EdgeKindAsync, edge.Kind)
 }
