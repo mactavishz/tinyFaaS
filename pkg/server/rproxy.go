@@ -52,7 +52,7 @@ func DefaultPrewarmTuning() PrewarmTuning {
 		Concurrency:  2,
 		PerCallLimit: 2,
 		MinSavings:   100 * time.Millisecond,
-		SafetyMargin: 200 * time.Millisecond,
+		SafetyMargin: 50 * time.Millisecond,
 	}
 }
 
