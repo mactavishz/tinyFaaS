@@ -49,8 +49,8 @@ type PrewarmTuning struct {
 // DefaultPrewarmTuning returns reasonable defaults
 func DefaultPrewarmTuning() PrewarmTuning {
 	return PrewarmTuning{
-		Concurrency:  2,
-		PerCallLimit: 2,
+		Concurrency:  3,
+		PerCallLimit: 4,
 		MinSavings:   100 * time.Millisecond,
 		SafetyMargin: 50 * time.Millisecond,
 	}
