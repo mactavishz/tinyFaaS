@@ -133,6 +133,7 @@ func (db *DockerBackend) Create(name string, env string, replicas int, filedir s
 		handlerIPs:  make([]string, 0, replicas),
 		isRunning:   false,
 		labels:      labels,
+		httpClient:  newHealthClient(),
 		logger:      db.logger,
 	}
 

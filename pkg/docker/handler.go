@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -15,8 +15,9 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 
-	"github.com/containerd/errdefs"
 	"log/slog"
+
+	"github.com/containerd/errdefs"
 
 	tflogs "github.com/OpenFogStack/tinyFaaS/pkg/logs"
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
@@ -30,10 +31,9 @@ const (
 
 	functionLogDriver = "journald"
 
-	containerReadyTimeout         = 10 * time.Second
+	containerReadyTimeout         = 60 * time.Second
 	containerHealthRequestTimeout = 100 * time.Millisecond
-	containerHealthInitialDelay   = 50 * time.Millisecond
-	containerHealthMaxDelay       = 250 * time.Millisecond
+	containerHealthPollInterval   = 25 * time.Millisecond
 )
 
 // List of supported runtimes (must match directories in pkg/docker/runtimes)
@@ -59,6 +59,7 @@ type dockerHandler struct {
 	containerLabels  map[string]string  // store merged labels (system + user) for container creation
 	envVars          []string           // store environment variables for container recreation
 	extraHosts       []string           // store extra hosts for container recreation
+	httpClient       *http.Client
 	containerRemover func(string) error // optional override for tests
 	networkCreator   func() (string, error)
 	ipInspector      func(string) (string, error)
@@ -66,6 +67,20 @@ type dockerHandler struct {
 	networkRemover   func() error // optional override for tests
 	imageRemover     func() error // optional override for tests
 	logger           *slog.Logger
+}
+
+func newHealthClient() *http.Client {
+	return &http.Client{
+		Timeout: containerHealthRequestTimeout,
+		Transport: &http.Transport{
+			MaxIdleConnsPerHost: 1,
+			IdleConnTimeout:     containerReadyTimeout,
+			DisableCompression:  true,
+			DialContext: (&net.Dialer{
+				Timeout: containerHealthRequestTimeout,
+			}).DialContext,
+		},
+	}
 }
 
 type readinessResult struct {
@@ -382,8 +397,7 @@ func (dh *dockerHandler) probeContainerHealth(ip string) error {
 		return dh.healthChecker(ip)
 	}
 
-	httpClient := http.Client{Timeout: containerHealthRequestTimeout}
-	resp, err := httpClient.Get("http://" + ip + ":8000/health")
+	resp, err := dh.httpClient.Get("http://" + ip + ":8000/health")
 	if err != nil {
 		return err
 	}
@@ -396,26 +410,8 @@ func (dh *dockerHandler) probeContainerHealth(ip string) error {
 	return nil
 }
 
-// Calculate exponential backoff with full jitter for readiness checks
-func readinessBackoffDelay(attempt int) time.Duration {
-	delay := containerHealthInitialDelay
-
-	// Calculate exponential backoff
-	// Ensure we don't overflow before capping at MaxDelay
-	for i := 0; i < attempt && delay < containerHealthMaxDelay; i++ {
-		delay *= 2
-	}
-
-	if delay > containerHealthMaxDelay {
-		delay = containerHealthMaxDelay
-	}
-
-	// Apply Full Jitter
-	// rand.Int64n returns a value in [0, delay)
-	if delay <= 0 {
-		return 0
-	}
-	return time.Duration(rand.Int63n(int64(delay)))
+func readinessBackoffDelay(_ int) time.Duration {
+	return containerHealthPollInterval
 }
 
 func (dh *dockerHandler) removeContainers() error {
