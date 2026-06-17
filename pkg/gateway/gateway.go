@@ -141,7 +141,7 @@ func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, targetAdd
 	// Copy headers from original request
 	proxyReq.Header = r.Header.Clone()
 
-	g.logger.Debug("forwarding request",
+	g.logger.Info("forwarding request",
 		"method", r.Method,
 		"path", r.URL.Path,
 		"targetAddr", targetURL,
