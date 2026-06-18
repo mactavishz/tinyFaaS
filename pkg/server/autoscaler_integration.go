@@ -119,7 +119,7 @@ func (ms *ManagementService) ScaleUp(functionName string, cold bool) error {
 		return fmt.Errorf("autoscaler not enabled")
 	}
 
-	recordScaleUp := ms.claimScaleUpRecord(functionName)
+	recordScaleUp, stateBefore, claimStatus := ms.claimScaleUpRecord(functionName)
 	startTime := time.Now()
 	if recordScaleUp {
 		defer ms.releaseScaleUpRecord(functionName)
@@ -135,27 +135,40 @@ func (ms *ManagementService) ScaleUp(functionName string, cold bool) error {
 		ms.notifyScaleUp(functionName, startTime, scaleUpDuration, cold)
 	}
 
+	stateAfter, _ := ms.autoscaler.GetState(functionName)
+	source := "prewarm"
+	if cold {
+		source = "demand"
+	}
 	ms.logger.Info("scale-up completed",
 		"function", functionName,
 		"cold", cold,
-		"duration", scaleUpDuration)
+		"source", source,
+		"duration", scaleUpDuration,
+		"record_owner", recordScaleUp,
+		"claim_status", claimStatus,
+		"state_before", stateBefore,
+		"state_after", stateAfter)
 
 	return nil
 }
 
-func (ms *ManagementService) claimScaleUpRecord(functionName string) bool {
+func (ms *ManagementService) claimScaleUpRecord(functionName string) (bool, autoscaler.LifecycleState, string) {
 	state, ok := ms.autoscaler.GetState(functionName)
-	if !ok || state != autoscaler.StateScaledDown {
-		return false
+	if !ok {
+		return false, "", "state_not_found"
+	}
+	if state != autoscaler.StateScaledDown {
+		return false, state, "state_not_scaled_down"
 	}
 
 	ms.mux.Lock()
 	defer ms.mux.Unlock()
 	if _, exists := ms.scaleUpClaims[functionName]; exists {
-		return false
+		return false, state, "already_claimed"
 	}
 	ms.scaleUpClaims[functionName] = struct{}{}
-	return true
+	return true, state, "claimed"
 }
 
 func (ms *ManagementService) releaseScaleUpRecord(functionName string) {

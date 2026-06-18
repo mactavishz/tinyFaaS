@@ -743,8 +743,13 @@ func TestFilterAndRankPrewarmTargets(t *testing.T) {
 		},
 	}
 
-	got := r.filterAndRankPrewarmTargets(targets, tuning)
+	selection := r.selectPrewarmTargets(targets, tuning)
+	got := selection.targets
 	require.Len(t, got, 2, "expected per-call limit to trim to 2 targets")
+	assert.Equal(t, 1, selection.noColdData)
+	assert.Equal(t, 0, selection.invalidLead)
+	assert.Equal(t, 1, selection.lowSavings)
+	assert.Equal(t, 1, selection.limited)
 	assert.Equal(t, "se", got[0].FunctionName, "sync target with biggest savings should rank first")
 	assert.Equal(t, callgraph.EdgeKindSync, got[0].Kind)
 	// Second slot goes to whichever async target sorted highest by savings then name.
@@ -818,7 +823,7 @@ func TestEdgeKindHeaderPropagatedToTracker(t *testing.T) {
 	r.routingTableMux.Unlock()
 
 	hdr := http.Header{
-		"X-Call-Id":          []string{"req-edge-kind-async"},
+		"X-Call-Id":            []string{"req-edge-kind-async"},
 		"X-Tinyfaas-Edge-Kind": []string{"async"},
 	}
 	status, _ := r.Call("test-func", []byte("{}"), false, hdr)

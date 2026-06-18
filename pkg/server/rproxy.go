@@ -46,6 +46,33 @@ type PrewarmTuning struct {
 	SafetyMargin time.Duration
 }
 
+type prewarmAttempt struct {
+	id          string
+	callID      string
+	executionID string
+	caller      string
+	target      string
+	kind        callgraph.EdgeKind
+	createdAt   time.Time
+	fireAt      time.Time
+	leadTime    time.Duration
+	coldStart   time.Duration
+}
+
+func (a prewarmAttempt) logAttrs(extra ...any) []any {
+	attrs := []any{
+		"prewarm_id", a.id,
+		"call_id", a.callID,
+		"execution_id", a.executionID,
+		"caller", a.caller,
+		"target", a.target,
+		"kind", a.kind,
+		"leadTime", a.leadTime,
+		"coldStartTime", a.coldStart,
+	}
+	return append(attrs, extra...)
+}
+
 // DefaultPrewarmTuning returns reasonable defaults
 func DefaultPrewarmTuning() PrewarmTuning {
 	return PrewarmTuning{
@@ -431,7 +458,7 @@ func (r *InvocationRouter) invoke(name string, payload []byte, header http.Heade
 
 		// Trigger prewarming after the demanded function is ready and execution is tracked.
 		if r.autoscalerEnabled && r.tracker.PrewarmEnabled() {
-			go r.prewarmDownstream(name)
+			go r.prewarmDownstream(name, callID, calleeExecID)
 		}
 	}
 
@@ -551,25 +578,42 @@ func (r *InvocationRouter) GetTracker() callgraph.Tracker {
 //     then by expected savings descending.
 //  3. Take the top PerCallLimit targets and dispatch them. Concurrent prewarms
 //     are further capped by a semaphore inside executePrewarm.
-func (r *InvocationRouter) prewarmDownstream(functionName string) {
+func (r *InvocationRouter) prewarmDownstream(functionName string, callID string, executionID string) {
 	if r.tracker == nil {
 		return
 	}
 
 	tuning := r.PrewarmTuning()
 	rawTargets := r.tracker.GetPrewarmTargets(functionName)
-	candidates := r.filterAndRankPrewarmTargets(rawTargets, tuning)
-	if len(candidates) == 0 {
+	selection := r.selectPrewarmTargets(rawTargets, tuning)
+	if len(selection.targets) == 0 {
+		if len(rawTargets) > 0 {
+			r.logger.Debug("no prewarm targets selected",
+				"caller", functionName,
+				"call_id", callID,
+				"execution_id", executionID,
+				"raw", len(rawTargets),
+				"rejected_no_cold_data", selection.noColdData,
+				"rejected_invalid_lead", selection.invalidLead,
+				"rejected_low_savings", selection.lowSavings)
+		}
 		return
 	}
 
-	r.logger.Debug("prewarming downstream functions",
+	r.logger.Info("prewarm targets selected",
 		"caller", functionName,
+		"call_id", callID,
+		"execution_id", executionID,
 		"raw", len(rawTargets),
-		"selected", len(candidates))
+		"eligible", len(selection.targets)+selection.limited,
+		"selected", len(selection.targets),
+		"rejected_no_cold_data", selection.noColdData,
+		"rejected_invalid_lead", selection.invalidLead,
+		"rejected_low_savings", selection.lowSavings,
+		"rejected_per_call_limit", selection.limited)
 
-	for _, target := range candidates {
-		r.schedulePrewarm(functionName, target)
+	for _, target := range selection.targets {
+		r.schedulePrewarmWithContext(functionName, target, callID, executionID)
 	}
 }
 
@@ -581,21 +625,32 @@ type rankedPrewarmTarget struct {
 	syncEdge bool
 }
 
-// filterAndRankPrewarmTargets applies the savings filter, sorts targets so that
-// sync edges with the highest expected savings come first, and trims to the
-// per-call budget. Returns the trimmed PrewarmTarget slice in dispatch order.
-func (r *InvocationRouter) filterAndRankPrewarmTargets(targets []callgraph.PrewarmTarget, tuning PrewarmTuning) []callgraph.PrewarmTarget {
+type prewarmSelection struct {
+	targets     []callgraph.PrewarmTarget
+	noColdData  int
+	invalidLead int
+	lowSavings  int
+	limited     int
+}
+
+// selectPrewarmTargets applies the savings filter, sorts targets so that sync
+// edges with the highest expected savings come first, and trims to the
+// per-call budget. It also returns compact rejection counts for tracing.
+func (r *InvocationRouter) selectPrewarmTargets(targets []callgraph.PrewarmTarget, tuning PrewarmTuning) prewarmSelection {
+	selection := prewarmSelection{}
 	if len(targets) == 0 {
-		return nil
+		return selection
 	}
 
 	ranked := make([]rankedPrewarmTarget, 0, len(targets))
 	for _, t := range targets {
 		// Drop targets without cold-start data (we cannot estimate savings).
 		if t.AvgColdStartDuration <= 0 {
+			selection.noColdData++
 			continue
 		}
 		if t.LeadTime <= 0 {
+			selection.invalidLead++
 			continue
 		}
 
@@ -610,6 +665,7 @@ func (r *InvocationRouter) filterAndRankPrewarmTargets(targets []callgraph.Prewa
 		// schedule prewarms that only buy a few milliseconds.
 		usableLead := t.LeadTime - tuning.SafetyMargin
 		if usableLead <= 0 {
+			selection.invalidLead++
 			continue
 		}
 		savings := t.AvgColdStartDuration
@@ -617,6 +673,7 @@ func (r *InvocationRouter) filterAndRankPrewarmTargets(targets []callgraph.Prewa
 			savings = usableLead
 		}
 		if savings < tuning.MinSavings {
+			selection.lowSavings++
 			continue
 		}
 
@@ -641,20 +698,38 @@ func (r *InvocationRouter) filterAndRankPrewarmTargets(targets []callgraph.Prewa
 
 	limit := tuning.PerCallLimit
 	if limit > 0 && len(ranked) > limit {
+		selection.limited = len(ranked) - limit
 		ranked = ranked[:limit]
 	}
 
-	out := make([]callgraph.PrewarmTarget, 0, len(ranked))
+	selection.targets = make([]callgraph.PrewarmTarget, 0, len(ranked))
 	for _, rt := range ranked {
-		out = append(out, rt.target)
+		selection.targets = append(selection.targets, rt.target)
 	}
-	return out
+	return selection
 }
 
 // schedulePrewarm schedules a prewarm operation for a target function.
 // It calculates the delay based on lead time and cold start estimates,
 // ensuring the function is ready just in time for when it's needed.
 func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.PrewarmTarget) {
+	r.schedulePrewarmWithContext(caller, target, "", "")
+}
+
+func (r *InvocationRouter) schedulePrewarmWithContext(caller string, target callgraph.PrewarmTarget, callID string, executionID string) {
+	now := time.Now()
+	attempt := prewarmAttempt{
+		id:          uuid.NewString(),
+		callID:      callID,
+		executionID: executionID,
+		caller:      caller,
+		target:      target.FunctionName,
+		kind:        target.Kind,
+		createdAt:   now,
+		leadTime:    target.LeadTime,
+		coldStart:   target.AvgColdStartDuration,
+	}
+
 	// Respect per-function callgraph enablement: if target is disabled, skip prewarming it.
 	if !r.CallgraphEnabled(target.FunctionName) {
 		return
@@ -680,6 +755,7 @@ func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.Prewa
 			coldStartTime = stats.AvgColdStartDuration
 		}
 	}
+	attempt.coldStart = coldStartTime
 
 	// Calculate when to trigger prewarm:
 	// delay = leadTime - coldStartTime - margin
@@ -692,14 +768,10 @@ func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.Prewa
 			r.logger.Debug("skipping prewarming - target already reserved", "function", target.FunctionName)
 			return
 		}
-		r.logger.Info("prewarming immediately",
-			"caller", caller,
-			"target", target.FunctionName,
-			"kind", target.Kind,
-			"leadTime", target.LeadTime,
-			"coldStartTime", coldStartTime,
-			"delay", delay)
-		go r.executePrewarm(target.FunctionName)
+		attempt.fireAt = now
+		r.logger.Info("prewarming immediately", attempt.logAttrs(
+			"delay", delay)...)
+		go r.executePrewarmAttempt(attempt)
 		return
 	}
 
@@ -708,13 +780,9 @@ func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.Prewa
 		return
 	}
 
-	r.logger.Info("scheduling prewarm",
-		"caller", caller,
-		"target", target.FunctionName,
-		"kind", target.Kind,
-		"leadTime", target.LeadTime,
-		"coldStartTime", coldStartTime,
-		"delay", delay)
+	attempt.fireAt = now.Add(delay)
+	r.logger.Info("scheduling prewarm", attempt.logAttrs(
+		"delay", delay)...)
 
 	// Schedule the prewarm after the calculated delay
 	time.AfterFunc(delay, func() {
@@ -725,14 +793,25 @@ func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.Prewa
 		r.routingTableMux.RUnlock()
 
 		if !stillScaledDown {
-			r.logger.Debug("skipping scheduled prewarm - function became active",
-				"function", target.FunctionName)
+			// The request beat the scheduled prewarm: the timer fired after the
+			// function had already been cold-started by an actual invocation.
+			// Indicates the prewarm was scheduled too late (delay too large).
+			r.logger.Info("prewarm missed - function became active before scheduled fire", attempt.logAttrs(
+				"delay", delay,
+				"timer_lateness", nonNegativeDuration(time.Since(attempt.fireAt)))...)
 			r.clearPrewarmReservation(target.FunctionName)
 			return
 		}
 
-		r.executePrewarm(target.FunctionName)
+		r.executePrewarmAttempt(attempt)
 	})
+}
+
+func nonNegativeDuration(duration time.Duration) time.Duration {
+	if duration < 0 {
+		return 0
+	}
+	return duration
 }
 
 func (r *InvocationRouter) reservePrewarm(funcName string) bool {
@@ -758,30 +837,55 @@ func (r *InvocationRouter) clearPrewarmReservation(funcName string) {
 // If the budget is exhausted, the prewarm is dropped and the reservation
 // cleared so a future iteration can retry.
 func (r *InvocationRouter) executePrewarm(funcName string) {
+	now := time.Now()
+	r.executePrewarmAttempt(prewarmAttempt{
+		id:        uuid.NewString(),
+		target:    funcName,
+		createdAt: now,
+		fireAt:    now,
+	})
+}
+
+func (r *InvocationRouter) executePrewarmAttempt(attempt prewarmAttempt) {
 	r.prewarmMux.Lock()
 	sem := r.prewarmSemaphore
 	r.prewarmMux.Unlock()
 
+	used := 0
+	capacity := 0
 	if sem != nil {
+		used = len(sem)
+		capacity = cap(sem)
 		select {
 		case sem <- struct{}{}:
 			defer func() { <-sem }()
 		default:
-			r.logger.Debug("prewarm budget exhausted, skipping",
-				"function", funcName)
-			r.clearPrewarmReservation(funcName)
+			// The concurrency cap is saturated, so this prewarm is dropped
+			// entirely. Frequent occurrences mean the semaphore is the
+			// bottleneck (raise Concurrency or fire prewarms earlier).
+			r.logger.Info("prewarm dropped - concurrency budget exhausted", attempt.logAttrs(
+				"semaphore_used", used,
+				"semaphore_capacity", capacity,
+				"timer_lateness", nonNegativeDuration(time.Since(attempt.fireAt)))...)
+			r.clearPrewarmReservation(attempt.target)
 			return
 		}
 	}
 
-	if err := r.scaleUpFunction(funcName, false); err != nil {
-		r.clearPrewarmReservation(funcName)
-		r.logger.Debug("prewarm downstream function failed",
-			"function", funcName,
-			"err", err)
+	scaleUpStarted := time.Now()
+	if err := r.scaleUpFunction(attempt.target, false); err != nil {
+		r.clearPrewarmReservation(attempt.target)
+		r.logger.Warn("prewarm downstream function failed", attempt.logAttrs(
+			"err", err,
+			"scaleup_duration", time.Since(scaleUpStarted),
+			"total_duration", time.Since(attempt.createdAt),
+			"timer_lateness", nonNegativeDuration(scaleUpStarted.Sub(attempt.fireAt)))...)
 	} else {
-		r.logger.Info("prewarm downstream function completed",
-			"function", funcName)
+		r.logger.Info("prewarm downstream function completed", attempt.logAttrs(
+			"scaleup_duration", time.Since(scaleUpStarted),
+			"total_duration", time.Since(attempt.createdAt),
+			"timer_lateness", nonNegativeDuration(scaleUpStarted.Sub(attempt.fireAt)),
+			"semaphore_capacity", capacity)...)
 	}
 }
 

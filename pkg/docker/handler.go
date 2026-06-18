@@ -53,12 +53,12 @@ type dockerHandler struct {
 	networkLabels    map[string]string
 	containers       []string
 	handlerIPs       []string
-	isRunning        bool               // track if containers are running
-	opMux            sync.Mutex         // mutex for start/stop/restart operations
-	labels           map[string]string  // store user-provided labels (for GetLabels())
-	containerLabels  map[string]string  // store merged labels (system + user) for container creation
-	envVars          []string           // store environment variables for container recreation
-	extraHosts       []string           // store extra hosts for container recreation
+	isRunning        bool              // track if containers are running
+	opMux            sync.Mutex        // mutex for start/stop/restart operations
+	labels           map[string]string // store user-provided labels (for GetLabels())
+	containerLabels  map[string]string // store merged labels (system + user) for container creation
+	envVars          []string          // store environment variables for container recreation
+	extraHosts       []string          // store extra hosts for container recreation
 	httpClient       *http.Client
 	containerRemover func(string) error // optional override for tests
 	networkCreator   func() (string, error)
@@ -99,23 +99,27 @@ func (dh *dockerHandler) Start() error {
 	dh.opMux.Lock()
 	defer dh.opMux.Unlock()
 	ctx := context.Background()
+	startupStarted := time.Now()
 
 	if dh.isRunning {
 		dh.logger.Info("function is already started", "name", dh.name)
 		return nil
 	}
 
+	networkStarted := time.Now()
 	if err := dh.createNetwork(); err != nil {
 		return err
 	}
+	networkDuration := time.Since(networkStarted)
 
 	// Clear any old container IDs
 	dh.containers = make([]string, 0, dh.replicas)
 	dh.handlerIPs = make([]string, 0, dh.replicas)
 
 	// Create containers from image
+	containerCreateStarted := time.Now()
 	for i := 0; i < dh.replicas; i++ {
-		dh.logger.Info("creating function container", "name", dh.name, "replica", i+1)
+		dh.logger.Debug("creating function container", "name", dh.name, "replica", i+1)
 		containerResp, err := dh.client.ContainerCreate(
 			ctx,
 			client.ContainerCreateOptions{
@@ -150,10 +154,12 @@ func (dh *dockerHandler) Start() error {
 		}
 		dh.containers = append(dh.containers, containerResp.ID)
 	}
+	containerCreateDuration := time.Since(containerCreateStarted)
 
+	containerStartStarted := time.Now()
 	for _, cid := range dh.containers {
 		// Start container
-		dh.logger.Info("starting container", "ID", util.GetShortID(cid))
+		dh.logger.Debug("starting container", "function", dh.name, "ID", util.GetShortID(cid))
 		_, err := dh.client.ContainerStart(
 			context.Background(),
 			cid,
@@ -168,8 +174,10 @@ func (dh *dockerHandler) Start() error {
 			return baseErr
 		}
 	}
+	containerStartDuration := time.Since(containerStartStarted)
 
 	results := make(chan readinessResult, len(dh.containers))
+	readinessStarted := time.Now()
 
 	for i, cid := range dh.containers {
 		go func(index int, containerID string) {
@@ -179,8 +187,8 @@ func (dh *dockerHandler) Start() error {
 				return
 			}
 
-			dh.logger.Info("container IP", "ip", ip)
-			dh.logger.Info("waiting for container to be ready", "ip", ip)
+			dh.logger.Debug("container IP", "function", dh.name, "container", util.GetShortID(containerID), "ip", ip)
+			dh.logger.Debug("waiting for container to be ready", "function", dh.name, "container", util.GetShortID(containerID), "ip", ip)
 
 			err = dh.waitForContainerReady(ip, containerID, containerReadyTimeout)
 			if err != nil {
@@ -219,6 +227,7 @@ func (dh *dockerHandler) Start() error {
 
 		handlerIPs[res.index] = res.ip
 	}
+	readinessDuration := time.Since(readinessStarted)
 
 	if len(readinessErrors) > 0 {
 		baseErr := fmt.Errorf("container readiness failed: %w", errors.Join(readinessErrors...))
@@ -232,7 +241,14 @@ func (dh *dockerHandler) Start() error {
 
 	dh.logger.Debug("health check completed", "total", len(dh.handlerIPs))
 	dh.isRunning = true
-	dh.logger.Info("all containers started", "count", len(dh.containers))
+	dh.logger.Info("all containers started",
+		"function", dh.name,
+		"count", len(dh.containers),
+		"network_duration", networkDuration,
+		"container_create_duration", containerCreateDuration,
+		"container_start_duration", containerStartDuration,
+		"readiness_duration", readinessDuration,
+		"total_duration", time.Since(startupStarted))
 	return nil
 }
 
@@ -363,7 +379,7 @@ func (dh *dockerHandler) waitForContainerReady(ip string, containerID string, ti
 	for {
 		err := dh.probeContainerHealth(ip)
 		if err == nil {
-			dh.logger.Info("container is ready", "ip", ip)
+			dh.logger.Debug("container is ready", "function", dh.name, "container", util.GetShortID(containerID), "ip", ip, "attempts", attempt+1)
 			return nil
 		}
 
