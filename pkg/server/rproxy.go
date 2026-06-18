@@ -59,6 +59,18 @@ type prewarmAttempt struct {
 	coldStart   time.Duration
 }
 
+type prewarmAdmission struct {
+	semaphore chan struct{}
+	used      int
+	capacity  int
+	rejection string
+}
+
+const (
+	prewarmRejectedConcurrency = "concurrency_budget_exhausted"
+	prewarmRejectedSyncReserve = "sync_capacity_reserved"
+)
+
 func (a prewarmAttempt) logAttrs(extra ...any) []any {
 	attrs := []any{
 		"prewarm_id", a.id,
@@ -97,8 +109,8 @@ type InvocationRouter struct {
 	prewarmMux      sync.Mutex
 	prewarmInFlight map[string]struct{}
 	// prewarmSemaphore caps concurrent prewarm scale-ups (demand bypasses).
-	// nil disables the cap. Non-nil with capacity N admits at most N
-	// in-flight executePrewarm calls; the rest are dropped non-blockingly.
+	// nil disables the cap. Non-sync prewarms may use at most N-1 slots so
+	// synchronous critical-path work always has reserved capacity.
 	prewarmSemaphore chan struct{}
 	prewarmTuning    PrewarmTuning
 
@@ -841,35 +853,29 @@ func (r *InvocationRouter) executePrewarm(funcName string) {
 	r.executePrewarmAttempt(prewarmAttempt{
 		id:        uuid.NewString(),
 		target:    funcName,
+		kind:      callgraph.EdgeKindSync,
 		createdAt: now,
 		fireAt:    now,
 	})
 }
 
 func (r *InvocationRouter) executePrewarmAttempt(attempt prewarmAttempt) {
-	r.prewarmMux.Lock()
-	sem := r.prewarmSemaphore
-	r.prewarmMux.Unlock()
-
-	used := 0
-	capacity := 0
-	if sem != nil {
-		used = len(sem)
-		capacity = cap(sem)
-		select {
-		case sem <- struct{}{}:
-			defer func() { <-sem }()
-		default:
-			// The concurrency cap is saturated, so this prewarm is dropped
-			// entirely. Frequent occurrences mean the semaphore is the
-			// bottleneck (raise Concurrency or fire prewarms earlier).
-			r.logger.Info("prewarm dropped - concurrency budget exhausted", attempt.logAttrs(
-				"semaphore_used", used,
-				"semaphore_capacity", capacity,
-				"timer_lateness", nonNegativeDuration(time.Since(attempt.fireAt)))...)
-			r.clearPrewarmReservation(attempt.target)
-			return
+	admission := r.acquirePrewarmSlot(attempt.kind)
+	if admission.rejection != "" {
+		message := "prewarm dropped - concurrency budget exhausted"
+		if admission.rejection == prewarmRejectedSyncReserve {
+			message = "prewarm dropped - sync capacity reserved"
 		}
+		r.logger.Info(message, attempt.logAttrs(
+			"reason", admission.rejection,
+			"semaphore_used", admission.used,
+			"semaphore_capacity", admission.capacity,
+			"timer_lateness", nonNegativeDuration(time.Since(attempt.fireAt)))...)
+		r.clearPrewarmReservation(attempt.target)
+		return
+	}
+	if admission.semaphore != nil {
+		defer func() { <-admission.semaphore }()
 	}
 
 	scaleUpStarted := time.Now()
@@ -885,7 +891,38 @@ func (r *InvocationRouter) executePrewarmAttempt(attempt prewarmAttempt) {
 			"scaleup_duration", time.Since(scaleUpStarted),
 			"total_duration", time.Since(attempt.createdAt),
 			"timer_lateness", nonNegativeDuration(scaleUpStarted.Sub(attempt.fireAt)),
-			"semaphore_capacity", capacity)...)
+			"semaphore_capacity", admission.capacity)...)
+	}
+}
+
+// acquirePrewarmSlot atomically applies global admission policy. Unknown edges
+// are treated like async edges: they may use spare capacity but cannot consume
+// the final slot reserved for known synchronous work.
+func (r *InvocationRouter) acquirePrewarmSlot(kind callgraph.EdgeKind) prewarmAdmission {
+	r.prewarmMux.Lock()
+	defer r.prewarmMux.Unlock()
+
+	sem := r.prewarmSemaphore
+	if sem == nil {
+		return prewarmAdmission{}
+	}
+
+	admission := prewarmAdmission{
+		semaphore: sem,
+		used:      len(sem),
+		capacity:  cap(sem),
+	}
+	if kind != callgraph.EdgeKindSync && admission.used >= admission.capacity-1 {
+		admission.rejection = prewarmRejectedSyncReserve
+		return admission
+	}
+
+	select {
+	case sem <- struct{}{}:
+		return admission
+	default:
+		admission.rejection = prewarmRejectedConcurrency
+		return admission
 	}
 }
 

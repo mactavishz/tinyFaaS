@@ -800,6 +800,193 @@ func TestPrewarmConcurrencyCapDropsExcessExecutions(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+func TestPrewarmAdmissionReservesCapacityForSyncTargets(t *testing.T) {
+	r := NewInvocationRouter(nopLogger(), "development")
+	r.SetPrewarmTuning(PrewarmTuning{
+		Concurrency:  2,
+		PerCallLimit: 5,
+		MinSavings:   0,
+		SafetyMargin: 50 * time.Millisecond,
+	})
+
+	release := make(chan struct{})
+	executed := make(chan string, 3)
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		executed <- name
+		<-release
+		return nil
+	})
+
+	attempt := func(name string, kind callgraph.EdgeKind) prewarmAttempt {
+		now := time.Now()
+		return prewarmAttempt{
+			id:        "prewarm-" + name,
+			target:    name,
+			kind:      kind,
+			createdAt: now,
+			fireAt:    now,
+		}
+	}
+
+	for _, name := range []string{"async-a", "async-b", "sync-c"} {
+		require.True(t, r.reservePrewarm(name))
+	}
+
+	go r.executePrewarmAttempt(attempt("async-a", callgraph.EdgeKindAsync))
+	require.Eventually(t, func() bool {
+		return len(executed) == 1
+	}, time.Second, 10*time.Millisecond)
+
+	// A second async target must not consume the slot reserved for sync work.
+	r.executePrewarmAttempt(attempt("async-b", callgraph.EdgeKindAsync))
+	assert.Equal(t, 1, len(executed))
+	require.True(t, r.reservePrewarm("async-b"), "a rejected attempt must clear its reservation")
+	r.clearPrewarmReservation("async-b")
+
+	// Sync work can use the reserved slot while the first async prewarm runs.
+	go r.executePrewarmAttempt(attempt("sync-c", callgraph.EdgeKindSync))
+	require.Eventually(t, func() bool {
+		return len(executed) == 2
+	}, time.Second, 10*time.Millisecond)
+
+	close(release)
+}
+
+func TestPrewarmAdmissionCapacityOneIsSyncOnly(t *testing.T) {
+	r := NewInvocationRouter(nopLogger(), "development")
+	r.SetPrewarmTuning(PrewarmTuning{Concurrency: 1})
+
+	executed := make(chan string, 1)
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		executed <- name
+		return nil
+	})
+
+	now := time.Now()
+	require.True(t, r.reservePrewarm("async"))
+	r.executePrewarmAttempt(prewarmAttempt{
+		id:        "prewarm-async",
+		target:    "async",
+		kind:      callgraph.EdgeKindAsync,
+		createdAt: now,
+		fireAt:    now,
+	})
+	assert.Empty(t, executed)
+
+	require.True(t, r.reservePrewarm("sync"))
+	r.executePrewarmAttempt(prewarmAttempt{
+		id:        "prewarm-sync",
+		target:    "sync",
+		kind:      callgraph.EdgeKindSync,
+		createdAt: now,
+		fireAt:    now,
+	})
+	assert.Equal(t, "sync", <-executed)
+}
+
+// TestAcquirePrewarmSlot exercises the global admission policy directly so the
+// rejection reason codes and used/capacity reporting are pinned, including the
+// edges the behavioural tests don't reach (sync rejected when genuinely full,
+// and the disabled-cap path).
+func TestAcquirePrewarmSlot(t *testing.T) {
+	tests := []struct {
+		name          string
+		concurrency   int
+		preFill       int // tokens to occupy before the call
+		kind          callgraph.EdgeKind
+		wantAdmitted  bool
+		wantRejection string
+		wantUsed      int
+		wantCapacity  int
+	}{
+		{
+			name:         "async admitted into spare capacity",
+			concurrency:  2,
+			preFill:      0,
+			kind:         callgraph.EdgeKindAsync,
+			wantAdmitted: true,
+			wantUsed:     0,
+			wantCapacity: 2,
+		},
+		{
+			name:          "async rejected to reserve last slot for sync",
+			concurrency:   2,
+			preFill:       1,
+			kind:          callgraph.EdgeKindAsync,
+			wantRejection: prewarmRejectedSyncReserve,
+			wantUsed:      1,
+			wantCapacity:  2,
+		},
+		{
+			name:         "sync admitted into the reserved slot",
+			concurrency:  2,
+			preFill:      1,
+			kind:         callgraph.EdgeKindSync,
+			wantAdmitted: true,
+			wantUsed:     1,
+			wantCapacity: 2,
+		},
+		{
+			name:          "sync rejected when genuinely full",
+			concurrency:   2,
+			preFill:       2,
+			kind:          callgraph.EdgeKindSync,
+			wantRejection: prewarmRejectedConcurrency,
+			wantUsed:      2,
+			wantCapacity:  2,
+		},
+		{
+			name:          "async always rejected at capacity one",
+			concurrency:   1,
+			preFill:       0,
+			kind:          callgraph.EdgeKindAsync,
+			wantRejection: prewarmRejectedSyncReserve,
+			wantUsed:      0,
+			wantCapacity:  1,
+		},
+		{
+			name:         "disabled cap always admits",
+			concurrency:  0,
+			preFill:      0,
+			kind:         callgraph.EdgeKindAsync,
+			wantAdmitted: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewInvocationRouter(nopLogger(), "development")
+			r.SetPrewarmTuning(PrewarmTuning{Concurrency: tc.concurrency})
+			for i := 0; i < tc.preFill; i++ {
+				r.prewarmSemaphore <- struct{}{}
+			}
+
+			admission := r.acquirePrewarmSlot(tc.kind)
+
+			if tc.wantAdmitted {
+				assert.Empty(t, admission.rejection, "expected admission")
+			} else {
+				assert.Equal(t, tc.wantRejection, admission.rejection)
+				assert.Equal(t, tc.wantUsed, admission.used)
+				assert.Equal(t, tc.wantCapacity, admission.capacity)
+			}
+
+			if tc.concurrency <= 0 {
+				assert.Nil(t, admission.semaphore, "disabled cap reports no semaphore")
+				return
+			}
+
+			// A successful acquire must have taken exactly one slot; a rejection
+			// must leave the occupancy untouched.
+			wantLen := tc.preFill
+			if tc.wantAdmitted {
+				wantLen++
+			}
+			assert.Equal(t, wantLen, len(r.prewarmSemaphore), "semaphore occupancy after acquire")
+		})
+	}
+}
+
 // TestEdgeKindHeaderPropagatedToTracker verifies the rproxy reads the
 // X-Tinyfaas-Edge-Kind header set by the gateway and tags the recorded edge
 // accordingly. This is what enables sync/async-aware prewarm scheduling.
