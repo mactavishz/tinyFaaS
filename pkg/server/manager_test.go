@@ -425,6 +425,53 @@ func TestScaleDownFailureRestoresRoute(t *testing.T) {
 	assert.Equal(t, 1, routeRecorder.count(http.MethodPut, "/config"))
 }
 
+func TestManagementScaleDownStopsActiveFunction(t *testing.T) {
+	backend := newTestBackend()
+	ms, _ := newManagerWithRouteRecorder(t, backend)
+	as := installAutoScaler(ms)
+
+	handler := &testHandler{name: "echo", ips: []string{"10.0.0.1"}, running: true}
+	ms.functionHandlers["echo"] = handler
+	ms.functionConfigs["echo"] = FunctionConfig{Name: "echo", Running: true}
+	as.RegisterFunction("echo", map[string]string{"com.tinyfaas.scale.zero": "true"})
+
+	require.NoError(t, ms.ScaleDown("echo"))
+
+	state, ok := as.GetState("echo")
+	require.True(t, ok)
+	assert.Equal(t, autoscaler.StateScaledDown, state)
+	_, stopCalls, _ := handler.counts()
+	assert.Equal(t, 1, stopCalls)
+	assert.False(t, handler.IsRunning())
+}
+
+func TestManagementScaleDownIsIdempotent(t *testing.T) {
+	backend := newTestBackend()
+	ms, _ := newManagerWithRouteRecorder(t, backend)
+	as := installAutoScaler(ms)
+
+	handler := &testHandler{name: "echo", ips: []string{"10.0.0.1"}, running: false}
+	ms.functionHandlers["echo"] = handler
+	ms.functionConfigs["echo"] = FunctionConfig{Name: "echo"}
+	as.RegisterFunctionWithState("echo", map[string]string{"com.tinyfaas.scale.zero": "true"}, autoscaler.StateScaledDown)
+
+	// Already scaled down: scaling down again must be a no-op, not an error.
+	require.NoError(t, ms.ScaleDown("echo"))
+
+	_, stopCalls, _ := handler.counts()
+	assert.Equal(t, 0, stopCalls, "no Stop call expected for an already scaled-down function")
+}
+
+func TestManagementScaleDownErrsWhenAutoscalerDisabled(t *testing.T) {
+	backend := newTestBackend()
+	ms, _ := newManagerWithRouteRecorder(t, backend)
+	// No autoscaler installed.
+
+	err := ms.ScaleDown("echo")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autoscaler not enabled")
+}
+
 func TestScaleUpRecordsOnlyClaimingPrewarmDuringDemandRace(t *testing.T) {
 	backend := newTestBackend()
 	ms, routeRecorder := newManagerWithRouteRecorder(t, backend)

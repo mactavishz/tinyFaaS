@@ -153,6 +153,28 @@ func (ms *ManagementService) ScaleUp(functionName string, cold bool) error {
 	return nil
 }
 
+// ScaleDown forces a function to scale to zero immediately, waiting for any
+// in-flight requests to drain. Unlike the autoscaler's idle monitor, this is
+// unconditional and does not consider the idle duration, so it is suitable for
+// callers that are the authority on the decision (e.g. a benchmark resetting to
+// a cold state between iterations). It is idempotent: scaling down an already
+// scaled-down function is a no-op.
+func (ms *ManagementService) ScaleDown(functionName string) error {
+	if ms.autoscaler == nil || !ms.autoscaler.IsEnabled() {
+		return fmt.Errorf("autoscaler not enabled")
+	}
+
+	startTime := time.Now()
+	if err := ms.autoscaler.ScaleDownWhenIdle(functionName); err != nil {
+		return err
+	}
+
+	ms.logger.Info("forced scale-down completed",
+		"function", functionName,
+		"duration", time.Since(startTime))
+	return nil
+}
+
 func (ms *ManagementService) claimScaleUpRecord(functionName string) (bool, autoscaler.LifecycleState, string) {
 	state, ok := ms.autoscaler.GetState(functionName)
 	if !ok {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -235,6 +237,7 @@ func (s *service) register(mux *http.ServeMux) {
 	mux.HandleFunc("/invoke/", s.invokeHandler)
 	mux.HandleFunc("/async-invoke/", s.asyncInvokeHandler)
 	mux.HandleFunc("/scale-up/", s.scaleUpHandler)
+	mux.HandleFunc("/scale-down/", s.scaleDownHandler)
 	mux.HandleFunc("/callgraph", s.callgraphHandler)
 	mux.HandleFunc("/callgraph/function/", s.callgraphFunctionHandler)
 	mux.HandleFunc("/callgraph/edge", s.callgraphEdgeHandler)
@@ -288,6 +291,93 @@ func (s *service) scaleUpHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// scaleDownHandler forces functions to scale to zero on demand.
+//
+// Path: /scale-down/{name}. A name of "*" scales down every deployed function.
+// This is intended for callers that want to deterministically reset to a cold
+// state (e.g. a benchmark between iterations) without waiting for the
+// autoscaler's idle timer.
+//
+// Response semantics:
+//
+//	200 OK              function(s) scaled down (or already scaled down). When
+//	                    the autoscaler is disabled this is a no-op, since
+//	                    functions never scale down.
+//	400 Bad Request     missing function name.
+//	404 Not Found       single named function does not exist.
+//	503 Service Unavail one or more scale-downs failed.
+func (s *service) scaleDownHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "invalid method", http.StatusMethodNotAllowed)
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/scale-down/")
+	if name == "" {
+		http.Error(w, "function name required", http.StatusBadRequest)
+		return
+	}
+
+	// When the autoscaler is disabled, functions stay running and never scale
+	// down, so this is a no-op. Mirror scaleUpHandler and return 200.
+	if s.autoscale == nil || !s.autoscale.IsEnabled() {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if name == "*" {
+		names := make([]string, 0)
+		for _, cfg := range s.ms.List() {
+			names = append(names, cfg.Name)
+		}
+		if err := s.scaleDownAll(names); err != nil {
+			s.logger.Error("scale-down all failed", "err", err)
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if _, ok := s.ms.Get(name); !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if err := s.ms.ScaleDown(name); err != nil {
+		s.logger.Error("scale-down failed", "function", name, "err", err)
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// scaleDownAll scales down the given functions concurrently and joins any
+// errors. Each function's scale-down is independent (separate autoscaler entry
+// and container handler), so running them in parallel is safe and keeps the
+// reset fast when many functions are deployed.
+func (s *service) scaleDownAll(names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs []error
+	)
+	for _, name := range names {
+		wg.Add(1)
+		go func(fn string) {
+			defer wg.Done()
+			if err := s.ms.ScaleDown(fn); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("%s: %w", fn, err))
+				mu.Unlock()
+			}
+		}(name)
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 func (s *service) uploadHandler(w http.ResponseWriter, r *http.Request) {

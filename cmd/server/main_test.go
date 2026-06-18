@@ -11,10 +11,12 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/queue"
 	tinyserver "github.com/OpenFogStack/tinyFaaS/pkg/server"
 	invstats "github.com/OpenFogStack/tinyFaaS/pkg/stats"
+	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
 )
 
 type serverTestBackend struct{}
@@ -192,5 +194,105 @@ func TestScaleUpHandlerReturns404ForMissingFunction(t *testing.T) {
 	s.scaleUpHandler(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// installServerAutoscaler enables an autoscaler on the service and registers
+// every currently deployed function as Active, mirroring a freshly deployed,
+// running system.
+func installServerAutoscaler(t *testing.T, s *service) *autoscaler.AutoScaler {
+	t.Helper()
+	as := autoscaler.New(
+		autoscaler.Config{Enabled: true, Platform: "tinyfaas", DefaultIdleDuration: time.Minute},
+		tinyserver.NewTinyFaaSScaleOp(s.ms, serverTestLogger()),
+		serverTestLogger(),
+	)
+	for _, cfg := range s.ms.List() {
+		as.RegisterFunctionWithState(cfg.Name, map[string]string{"com.tinyfaas.scale.zero": "true"}, autoscaler.StateActive)
+	}
+	s.ms.SetAutoScaler(as)
+	s.autoscale = as
+	return as
+}
+
+func TestScaleDownHandlerRejectsNonPost(t *testing.T) {
+	s := newAsyncTestService(t, &recordingPublisher{})
+	req := httptest.NewRequest(http.MethodGet, "/scale-down/echo", nil)
+	rec := httptest.NewRecorder()
+	s.scaleDownHandler(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+}
+
+func TestScaleDownHandlerRequiresName(t *testing.T) {
+	s := newAsyncTestService(t, &recordingPublisher{})
+	req := httptest.NewRequest(http.MethodPost, "/scale-down/", nil)
+	rec := httptest.NewRecorder()
+	s.scaleDownHandler(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestScaleDownHandlerNoOpWhenAutoscalerDisabled(t *testing.T) {
+	s := newAsyncTestService(t, &recordingPublisher{})
+	// s.autoscale left nil.
+	req := httptest.NewRequest(http.MethodPost, "/scale-down/echo", nil)
+	rec := httptest.NewRecorder()
+	s.scaleDownHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScaleDownHandlerReturns404ForMissingFunction(t *testing.T) {
+	s := newAsyncTestService(t, &recordingPublisher{})
+	installServerAutoscaler(t, s)
+
+	req := httptest.NewRequest(http.MethodPost, "/scale-down/missing", nil)
+	rec := httptest.NewRecorder()
+	s.scaleDownHandler(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScaleDownHandlerScalesNamedFunction(t *testing.T) {
+	s := newAsyncTestService(t, &recordingPublisher{})
+	as := installServerAutoscaler(t, s)
+
+	req := httptest.NewRequest(http.MethodPost, "/scale-down/echo", nil)
+	rec := httptest.NewRecorder()
+	s.scaleDownHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	state, ok := as.GetState("echo")
+	if !ok || state != autoscaler.StateScaledDown {
+		t.Fatalf("expected echo scaled-down, got state=%s ok=%v", state, ok)
+	}
+}
+
+func TestScaleDownHandlerWildcardScalesAll(t *testing.T) {
+	s := newAsyncTestService(t, &recordingPublisher{})
+	// Deploy a second function before installing the autoscaler so both register.
+	archive := createServerTestArchive(t)
+	if err := s.ms.UploadArchive("echo2", "go", 1, archive, nil, nil, tinyserver.FunctionResourceRequest{}); err != nil {
+		t.Fatalf("upload echo2: %v", err)
+	}
+	as := installServerAutoscaler(t, s)
+
+	req := httptest.NewRequest(http.MethodPost, "/scale-down/*", nil)
+	rec := httptest.NewRecorder()
+	s.scaleDownHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, fn := range []string{"echo", "echo2"} {
+		state, ok := as.GetState(fn)
+		if !ok || state != autoscaler.StateScaledDown {
+			t.Fatalf("expected %s scaled-down, got state=%s ok=%v", fn, state, ok)
+		}
 	}
 }
