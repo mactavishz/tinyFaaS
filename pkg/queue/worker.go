@@ -179,6 +179,8 @@ func (w *Worker) handleMessageData(data []byte, ack func() error) {
 		return
 	}
 
+	w.logger.Info("dequeued invocation", "function", req.Function)
+
 	if err := w.invoke(req); err != nil {
 		w.logger.Error("queued invocation transport failed", "function", req.Function, "err", err)
 		return
@@ -221,6 +223,6 @@ func (w *Worker) invoke(q Request) error {
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
-	w.logger.Debug("queued invocation completed", "function", q.Function, "status", resp.StatusCode, "duration", time.Since(start))
+	w.logger.Info("queued invocation completed", "function", q.Function, "status", resp.StatusCode, "duration", time.Since(start))
 	return nil
 }

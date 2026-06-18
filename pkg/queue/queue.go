@@ -102,7 +102,7 @@ func (p *NATSPublisher) Queue(req *Request) error {
 		return fmt.Errorf("nats publisher closed")
 	}
 
-	p.logger.Debug("queueing async invocation", "function", req.Function, "bytes", len(req.Body), "subject", subject)
+	p.logger.Info("queueing async invocation", "function", req.Function)
 	return conn.Publish(subject, body)
 }
 
