@@ -177,8 +177,20 @@ func (h *testHandler) restartCount() int {
 // tests can assert which scale-up was recorded.
 type recordingTracker struct {
 	callgraph.FullTracker
-	mu       sync.Mutex
-	scaleUps []scaleUpRecord
+	mu             sync.Mutex
+	scaleUps       []scaleUpRecord
+	prewarmEnabled bool
+	prewarmTargets map[string][]callgraph.PrewarmTarget
+}
+
+func (r *recordingTracker) PrewarmEnabled() bool {
+	return r.prewarmEnabled
+}
+
+func (r *recordingTracker) GetPrewarmTargets(functionName string) []callgraph.PrewarmTarget {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]callgraph.PrewarmTarget(nil), r.prewarmTargets[functionName]...)
 }
 
 type scaleUpRecord struct {
@@ -519,6 +531,54 @@ func TestScaleUpActiveFunctionDoesNotRecordScaleUp(t *testing.T) {
 
 	assert.Equal(t, 0, handler.restartCount())
 	assert.Empty(t, tracker.scaleUpRecords())
+}
+
+func TestPrewarmDownstreamEagerWarmsScaledDownTargets(t *testing.T) {
+	backend := newTestBackend()
+	s := newServer(t, backend)
+	tracker := newRecordingTracker()
+	tracker.prewarmEnabled = true
+	tracker.prewarmTargets = map[string][]callgraph.PrewarmTarget{
+		"iot-i": {
+			// Scaled-down synchronous callee with a tiny lead time: the eager path
+			// must warm it regardless of lead time, because the caller's in-progress
+			// cold start is the lead.
+			{FunctionName: "cw", Kind: callgraph.EdgeKindSync, LeadTime: 60 * time.Millisecond, AvgColdStartDuration: time.Second},
+			// Scaled-down asynchronous callee: off the critical path, must be skipped
+			// so it does not contend with the caller's own cold start.
+			{FunctionName: "ca", Kind: callgraph.EdgeKindAsync, LeadTime: 1500 * time.Millisecond, AvgColdStartDuration: time.Second},
+			// Already active synchronous callee: must be skipped (no restart).
+			{FunctionName: "se", Kind: callgraph.EdgeKindSync, LeadTime: 60 * time.Millisecond, AvgColdStartDuration: time.Second},
+		},
+	}
+	s.SetTracker(tracker)
+	as := installAutoScaler(s)
+
+	for _, name := range []string{"cw", "ca"} {
+		s.functionHandlers[name] = &testHandler{name: name, ips: []string{"10.0.0.9"}}
+		s.functionConfigs[name] = FunctionConfig{Name: name}
+		s.routingTable[name] = &Route{ips: []string{"10.0.0.9"}, isActive: false, callgraphEnabled: true}
+		as.RegisterFunctionWithState(name, map[string]string{"com.tinyfaas.scale.zero": "true"}, autoscaler.StateScaledDown)
+	}
+	// se is already active and must not be prewarmed.
+	s.functionHandlers["se"] = &testHandler{name: "se", ips: []string{"10.0.0.8"}, running: true}
+	s.functionConfigs["se"] = FunctionConfig{Name: "se", Running: true}
+	s.routingTable["se"] = &Route{ips: []string{"10.0.0.8"}, isActive: true, callgraphEnabled: true}
+	as.RegisterFunctionWithState("se", map[string]string{"com.tinyfaas.scale.zero": "true"}, autoscaler.StateActive)
+
+	s.prewarmDownstreamEager("iot-i")
+
+	// The scaled-down synchronous callee is warmed exactly once.
+	require.Eventually(t, func() bool {
+		return s.functionHandlers["cw"].(*testHandler).restartCount() == 1
+	}, time.Second, 10*time.Millisecond)
+	// Every prewarm slot is released back to the budget once the warms complete.
+	require.Eventually(t, func() bool { return len(s.prewarmSem) == 0 }, time.Second, 10*time.Millisecond)
+
+	// The asynchronous callee (off the critical path) and the already-active
+	// callee are never restarted.
+	assert.Equal(t, 0, s.functionHandlers["ca"].(*testHandler).restartCount(), "async callee must not be eagerly prewarmed")
+	assert.Equal(t, 0, s.functionHandlers["se"].(*testHandler).restartCount(), "already-active callee must not be prewarmed")
 }
 
 func TestGetReturnsFunctionConfig(t *testing.T) {
