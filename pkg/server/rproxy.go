@@ -36,7 +36,9 @@ type PrewarmTuning struct {
 	Concurrency int
 	// PerCallLimit caps how many prewarms a single caller invocation may schedule.
 	// Synchronous targets are sorted by expected savings and the first
-	// PerCallLimit are scheduled; the rest are dropped.
+	// PerCallLimit are scheduled; the rest are dropped. Zero means unlimited:
+	// every eligible synchronous target is scheduled and the global concurrency
+	// cap is the only limit on in-flight prewarms.
 	PerCallLimit int
 	// MinSavings is the minimum expected savings a prewarm target must offer
 	// to be considered. Targets with savings below this are skipped.
@@ -86,7 +88,7 @@ func (a prewarmAttempt) logAttrs(extra ...any) []any {
 func DefaultPrewarmTuning() PrewarmTuning {
 	return PrewarmTuning{
 		Concurrency:  2,
-		PerCallLimit: 2,
+		PerCallLimit: 0, // unlimited: schedule every eligible sync target, cap via Concurrency
 		MinSavings:   100 * time.Millisecond,
 		SafetyMargin: 50 * time.Millisecond,
 	}
