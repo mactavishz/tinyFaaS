@@ -533,7 +533,7 @@ func (s *Server) prewarmDownstream(functionName string) {
 		return
 	}
 
-	s.logger.Debug("prewarming downstream functions",
+	s.logger.Info("prewarming downstream functions",
 		"caller", functionName,
 		"targetCount", len(targets))
 
@@ -633,7 +633,7 @@ func (s *Server) schedulePrewarm(caller string, target callgraph.PrewarmTarget) 
 	s.routingTableMux.RUnlock()
 
 	if !isScaledDown {
-		s.logger.Debug("skipping prewarming - function already active",
+		s.logger.Info("skipping prewarming - function already active",
 			"function", target.FunctionName)
 		return
 	}
@@ -677,7 +677,7 @@ func (s *Server) schedulePrewarm(caller string, target callgraph.PrewarmTarget) 
 		s.routingTableMux.RUnlock()
 
 		if !stillScaledDown {
-			s.logger.Debug("skipping scheduled prewarm - function became active",
+			s.logger.Info("skipping scheduled prewarm - function became active",
 				"function", target.FunctionName)
 			return
 		}
@@ -689,7 +689,7 @@ func (s *Server) schedulePrewarm(caller string, target callgraph.PrewarmTarget) 
 // executePrewarm performs the actual prewarm operation for a function.
 func (s *Server) executePrewarm(funcName string) {
 	if err := s.ScaleUp(funcName, false); err != nil {
-		s.logger.Debug("prewarm downstream function failed",
+		s.logger.Info("prewarm downstream function failed",
 			"function", funcName,
 			"err", err)
 	} else {
