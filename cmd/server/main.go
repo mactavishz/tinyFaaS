@@ -184,12 +184,22 @@ func newPublisherWithRetry(config queue.NATSConfig, logger *slog.Logger, attempt
 // prewarmTuningFromEnv overlays env-based overrides on top of defaults so the
 // server can be tuned without rebuilds.
 //
+// TINYFAAS_PREWARM_TUNING_ENABLED  - true tunes prewarm selection (sync-only,
+//                                    savings ranking, per-call limit); false
+//                                    prewarms every downstream target.
 // TINYFAAS_PREWARM_CONCURRENCY     - max concurrent prewarms; 0 disables cap.
 // TINYFAAS_PREWARM_PER_CALL_LIMIT  - max prewarms scheduled per caller invocation.
 // TINYFAAS_PREWARM_MIN_SAVINGS_MS  - minimum expected savings to schedule a prewarm.
 // TINYFAAS_PREWARM_SAFETY_MARGIN_MS - safety margin subtracted from lead time.
 func prewarmTuningFromEnv(logger *slog.Logger, base tinyserver.PrewarmTuning) tinyserver.PrewarmTuning {
 	tuning := base
+	if raw := strings.TrimSpace(os.Getenv("TINYFAAS_PREWARM_TUNING_ENABLED")); raw != "" {
+		if v, err := strconv.ParseBool(raw); err == nil {
+			tuning.Enabled = v
+		} else {
+			logger.Warn("invalid TINYFAAS_PREWARM_TUNING_ENABLED", "value", raw, "err", err)
+		}
+	}
 	if raw := strings.TrimSpace(os.Getenv("TINYFAAS_PREWARM_CONCURRENCY")); raw != "" {
 		if v, err := strconv.Atoi(raw); err == nil && v >= 0 {
 			tuning.Concurrency = v
@@ -219,6 +229,7 @@ func prewarmTuningFromEnv(logger *slog.Logger, base tinyserver.PrewarmTuning) ti
 		}
 	}
 	logger.Info("prewarm tuning",
+		"enabled", tuning.Enabled,
 		"concurrency", tuning.Concurrency,
 		"per_call_limit", tuning.PerCallLimit,
 		"min_savings", tuning.MinSavings,

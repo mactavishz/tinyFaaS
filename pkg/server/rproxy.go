@@ -31,6 +31,13 @@ const EdgeKindHeader = "X-Tinyfaas-Edge-Kind"
 
 // PrewarmTuning controls how the invocation router schedules prewarms.
 type PrewarmTuning struct {
+	// Enabled selects the prewarm policy. When true, downstream targets are
+	// filtered to synchronous edges, ranked by expected savings, and dispatched
+	// under the per-call budget. When false, every downstream target is
+	// prewarmed regardless of edge kind, savings, or per-call limit (the
+	// original untuned behaviour). The global concurrency cap still applies in
+	// both modes and is controlled separately by Concurrency.
+	Enabled bool
 	// Concurrency caps how many prewarm scale-ups may run at the same time.
 	// Demand cold starts always bypass this cap.
 	Concurrency int
@@ -87,6 +94,7 @@ func (a prewarmAttempt) logAttrs(extra ...any) []any {
 // DefaultPrewarmTuning returns reasonable defaults
 func DefaultPrewarmTuning() PrewarmTuning {
 	return PrewarmTuning{
+		Enabled:      true,
 		Concurrency:  2,
 		PerCallLimit: 0, // unlimited: schedule every eligible sync target, cap via Concurrency
 		MinSavings:   100 * time.Millisecond,
@@ -586,8 +594,9 @@ func (r *InvocationRouter) GetTracker() callgraph.Tracker {
 //  1. Exclude non-sync edges and targets with insufficient expected savings or
 //     no useful data.
 //  2. Sort by expected savings descending.
-//  3. Take the top PerCallLimit targets and dispatch them. Concurrent prewarms
-//     are further capped by a semaphore inside executePrewarm.
+//  3. Exclude active/reserved targets, then dispatch ranked targets until the
+//     PerCallLimit budget is filled. Concurrent prewarms are further capped by
+//     a semaphore inside executePrewarm.
 func (r *InvocationRouter) prewarmDownstream(functionName string, callID string, executionID string) {
 	if r.tracker == nil {
 		return
@@ -595,7 +604,13 @@ func (r *InvocationRouter) prewarmDownstream(functionName string, callID string,
 
 	tuning := r.PrewarmTuning()
 	rawTargets := r.tracker.GetPrewarmTargets(functionName)
-	selection := r.selectPrewarmTargets(rawTargets, tuning)
+
+	if !tuning.Enabled {
+		r.prewarmAllDownstream(functionName, callID, executionID, rawTargets)
+		return
+	}
+
+	selection := r.rankPrewarmTargets(rawTargets, tuning)
 	if len(selection.targets) == 0 {
 		if len(rawTargets) > 0 {
 			r.logger.Debug("no prewarm targets selected",
@@ -610,23 +625,50 @@ func (r *InvocationRouter) prewarmDownstream(functionName string, callID string,
 		}
 		return
 	}
+	dispatch := r.dispatchPrewarmTargets(functionName, callID, executionID, selection.targets, tuning.PerCallLimit)
 
 	r.logger.Info("prewarm targets selected",
 		"caller", functionName,
 		"call_id", callID,
 		"execution_id", executionID,
 		"raw", len(rawTargets),
-		"eligible", len(selection.targets)+selection.limited,
-		"selected", len(selection.targets),
+		"eligible", dispatch.scheduled+dispatch.limited,
+		"selected", dispatch.scheduled,
 		"rejected_non_sync", selection.nonSync,
 		"rejected_no_cold_data", selection.noColdData,
 		"rejected_invalid_lead", selection.invalidLead,
 		"rejected_low_savings", selection.lowSavings,
-		"rejected_per_call_limit", selection.limited)
+		"rejected_active", dispatch.active,
+		"rejected_missing", dispatch.missing,
+		"rejected_disabled", dispatch.disabled,
+		"rejected_reserved", dispatch.reserved,
+		"rejected_per_call_limit", dispatch.limited)
+}
 
-	for _, target := range selection.targets {
-		r.schedulePrewarmWithContext(functionName, target, callID, executionID)
+// prewarmAllDownstream reproduces the original untuned behaviour: every
+// downstream target is scheduled regardless of edge kind, expected savings, or
+// per-call budget. Targets that are missing, callgraph-disabled, already
+// active, or reserved are still skipped inside schedulePrewarmWithContext. The
+// global concurrency cap (Concurrency) still applies, so set it to 0 to fully
+// reproduce the original uncapped behaviour.
+func (r *InvocationRouter) prewarmAllDownstream(caller string, callID string, executionID string, targets []callgraph.PrewarmTarget) {
+	if len(targets) == 0 {
+		return
 	}
+
+	scheduled := 0
+	for _, target := range targets {
+		if r.schedulePrewarmWithContext(caller, target, callID, executionID) == prewarmTargetScheduled {
+			scheduled++
+		}
+	}
+
+	r.logger.Info("prewarm all downstream (tuning disabled)",
+		"caller", caller,
+		"call_id", callID,
+		"execution_id", executionID,
+		"raw", len(targets),
+		"scheduled", scheduled)
 }
 
 // rankedPrewarmTarget pairs a callgraph target with its computed scheduling
@@ -645,10 +687,31 @@ type prewarmSelection struct {
 	limited     int
 }
 
-// selectPrewarmTargets excludes non-sync edges, applies the savings filter,
-// sorts by expected savings, and trims to the per-call budget. It also returns
-// compact rejection counts for tracing.
-func (r *InvocationRouter) selectPrewarmTargets(targets []callgraph.PrewarmTarget, tuning PrewarmTuning) prewarmSelection {
+type prewarmTargetStatus string
+
+const (
+	prewarmTargetAvailable prewarmTargetStatus = "available"
+	prewarmTargetScheduled prewarmTargetStatus = "scheduled"
+	prewarmTargetNonSync   prewarmTargetStatus = "non_sync"
+	prewarmTargetDisabled  prewarmTargetStatus = "disabled"
+	prewarmTargetActive    prewarmTargetStatus = "active"
+	prewarmTargetMissing   prewarmTargetStatus = "missing"
+	prewarmTargetReserved  prewarmTargetStatus = "reserved"
+)
+
+type prewarmDispatch struct {
+	scheduled int
+	active    int
+	missing   int
+	disabled  int
+	reserved  int
+	limited   int
+}
+
+// rankPrewarmTargets excludes non-sync edges, applies the savings filter, and
+// sorts by expected savings. Runtime availability and the per-call budget are
+// applied later so active or reserved targets cannot consume budget slots.
+func (r *InvocationRouter) rankPrewarmTargets(targets []callgraph.PrewarmTarget, tuning PrewarmTuning) prewarmSelection {
 	selection := prewarmSelection{}
 	if len(targets) == 0 {
 		return selection
@@ -709,12 +772,6 @@ func (r *InvocationRouter) selectPrewarmTargets(targets []callgraph.PrewarmTarge
 		return ranked[i].target.FunctionName < ranked[j].target.FunctionName
 	})
 
-	limit := tuning.PerCallLimit
-	if limit > 0 && len(ranked) > limit {
-		selection.limited = len(ranked) - limit
-		ranked = ranked[:limit]
-	}
-
 	selection.targets = make([]callgraph.PrewarmTarget, 0, len(ranked))
 	for _, rt := range ranked {
 		selection.targets = append(selection.targets, rt.target)
@@ -722,20 +779,68 @@ func (r *InvocationRouter) selectPrewarmTargets(targets []callgraph.PrewarmTarge
 	return selection
 }
 
-// schedulePrewarm schedules a prewarm operation for a target function.
-// It calculates the delay based on lead time and cold start estimates,
-// ensuring the function is ready just in time for when it's needed.
+// dispatchPrewarmTargets filters targets that cannot currently be prewarmed,
+// then schedules ranked candidates until the per-call budget is filled. The
+// scheduling step checks availability again and backfills when state changes
+// between the initial snapshot and reservation.
+func (r *InvocationRouter) dispatchPrewarmTargets(caller string, callID string, executionID string, targets []callgraph.PrewarmTarget, limit int) prewarmDispatch {
+	dispatch := prewarmDispatch{}
+	available := make([]callgraph.PrewarmTarget, 0, len(targets))
+	for _, target := range targets {
+		switch r.prewarmTargetAvailability(target.FunctionName) {
+		case prewarmTargetAvailable:
+			available = append(available, target)
+		case prewarmTargetActive:
+			dispatch.active++
+		case prewarmTargetMissing:
+			dispatch.missing++
+		case prewarmTargetDisabled:
+			dispatch.disabled++
+		case prewarmTargetReserved:
+			dispatch.reserved++
+		}
+	}
+
+	for index, target := range available {
+		if limit > 0 && dispatch.scheduled >= limit {
+			dispatch.limited = len(available) - index
+			break
+		}
+
+		switch r.schedulePrewarmWithContext(caller, target, callID, executionID) {
+		case prewarmTargetScheduled:
+			dispatch.scheduled++
+		case prewarmTargetActive:
+			dispatch.active++
+		case prewarmTargetMissing:
+			dispatch.missing++
+		case prewarmTargetDisabled:
+			dispatch.disabled++
+		case prewarmTargetReserved:
+			dispatch.reserved++
+		}
+	}
+
+	return dispatch
+}
+
+// schedulePrewarm is a context-free convenience wrapper used only by tests;
+// the runtime dispatch path calls schedulePrewarmWithContext directly so it can
+// correlate prewarm logs with the triggering call and execution IDs.
 func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.PrewarmTarget) {
 	r.schedulePrewarmWithContext(caller, target, "", "")
 }
 
-func (r *InvocationRouter) schedulePrewarmWithContext(caller string, target callgraph.PrewarmTarget, callID string, executionID string) {
-	if target.Kind != callgraph.EdgeKindSync {
+func (r *InvocationRouter) schedulePrewarmWithContext(caller string, target callgraph.PrewarmTarget, callID string, executionID string) prewarmTargetStatus {
+	tuning := r.PrewarmTuning()
+	// Sync-only filtering is part of the tuned policy. When tuning is disabled
+	// the original behaviour prewarms every downstream edge, including async.
+	if tuning.Enabled && target.Kind != callgraph.EdgeKindSync {
 		r.logger.Debug("skipping prewarming - edge is not synchronous",
 			"caller", caller,
 			"target", target.FunctionName,
 			"kind", target.Kind)
-		return
+		return prewarmTargetNonSync
 	}
 
 	now := time.Now()
@@ -751,21 +856,12 @@ func (r *InvocationRouter) schedulePrewarmWithContext(caller string, target call
 		coldStart:   target.AvgColdStartDuration,
 	}
 
-	// Respect per-function callgraph enablement: if target is disabled, skip prewarming it.
-	if !r.CallgraphEnabled(target.FunctionName) {
-		return
-	}
-
-	// Check if the function is currently scaled down
-	r.routingTableMux.RLock()
-	route, exists := r.routingTable[target.FunctionName]
-	isScaledDown := exists && !route.isActive
-	r.routingTableMux.RUnlock()
-
-	if !isScaledDown {
-		r.logger.Debug("skipping prewarming - function already active",
-			"function", target.FunctionName)
-		return
+	status := r.reservePrewarmTarget(target.FunctionName)
+	if status != prewarmTargetScheduled {
+		r.logger.Debug("skipping prewarming - target unavailable",
+			"function", target.FunctionName,
+			"reason", status)
+		return status
 	}
 
 	// Get the estimated cold start time from function stats
@@ -781,24 +877,14 @@ func (r *InvocationRouter) schedulePrewarmWithContext(caller string, target call
 	// Calculate when to trigger prewarm:
 	// delay = leadTime - coldStartTime - margin
 	// We want the function to be ready *before* it's needed
-	tuning := r.PrewarmTuning()
 	delay := target.LeadTime - coldStartTime - tuning.SafetyMargin
 
 	if delay <= 0 {
-		if !r.reservePrewarm(target.FunctionName) {
-			r.logger.Debug("skipping prewarming - target already reserved", "function", target.FunctionName)
-			return
-		}
 		attempt.fireAt = now
 		r.logger.Info("prewarming immediately", attempt.logAttrs(
 			"delay", delay)...)
 		go r.executePrewarmAttempt(attempt)
-		return
-	}
-
-	if !r.reservePrewarm(target.FunctionName) {
-		r.logger.Debug("skipping scheduled prewarm - target already reserved", "function", target.FunctionName)
-		return
+		return prewarmTargetScheduled
 	}
 
 	attempt.fireAt = now.Add(delay)
@@ -826,6 +912,7 @@ func (r *InvocationRouter) schedulePrewarmWithContext(caller string, target call
 
 		r.executePrewarmAttempt(attempt)
 	})
+	return prewarmTargetScheduled
 }
 
 func nonNegativeDuration(duration time.Duration) time.Duration {
@@ -835,6 +922,66 @@ func nonNegativeDuration(duration time.Duration) time.Duration {
 	return duration
 }
 
+// routePrewarmStatus classifies a target purely from its route state: missing,
+// callgraph-disabled, already active, or available (exists and scaled down).
+// Callers must hold routingTableMux (read or write). It does not inspect the
+// in-flight reservation set; callers layer that check on top under prewarmMux.
+func (r *InvocationRouter) routePrewarmStatus(funcName string) prewarmTargetStatus {
+	route, exists := r.routingTable[funcName]
+	if !exists {
+		return prewarmTargetMissing
+	}
+	if !route.callgraphEnabled {
+		return prewarmTargetDisabled
+	}
+	if route.isActive {
+		return prewarmTargetActive
+	}
+	return prewarmTargetAvailable
+}
+
+// prewarmTargetAvailability reports whether a target could currently be
+// prewarmed, without taking a reservation (a read-only snapshot).
+func (r *InvocationRouter) prewarmTargetAvailability(funcName string) prewarmTargetStatus {
+	r.routingTableMux.RLock()
+	defer r.routingTableMux.RUnlock()
+
+	if status := r.routePrewarmStatus(funcName); status != prewarmTargetAvailable {
+		return status
+	}
+
+	r.prewarmMux.Lock()
+	defer r.prewarmMux.Unlock()
+	if _, exists := r.prewarmInFlight[funcName]; exists {
+		return prewarmTargetReserved
+	}
+	return prewarmTargetAvailable
+}
+
+// reservePrewarmTarget atomically rechecks route availability and creates the
+// per-target reservation, returning prewarmTargetScheduled on success. Holding
+// the route read lock while taking prewarmMux follows the same lock order as
+// route updates, which clear reservations while holding the route write lock.
+func (r *InvocationRouter) reservePrewarmTarget(funcName string) prewarmTargetStatus {
+	r.routingTableMux.RLock()
+	defer r.routingTableMux.RUnlock()
+
+	if status := r.routePrewarmStatus(funcName); status != prewarmTargetAvailable {
+		return status
+	}
+
+	r.prewarmMux.Lock()
+	defer r.prewarmMux.Unlock()
+	if _, exists := r.prewarmInFlight[funcName]; exists {
+		return prewarmTargetReserved
+	}
+	r.prewarmInFlight[funcName] = struct{}{}
+	return prewarmTargetScheduled
+}
+
+// reservePrewarm is a low-level reservation primitive used only by tests to
+// seed in-flight state. The runtime path uses reservePrewarmTarget, which also
+// validates route state under the correct lock order.
 func (r *InvocationRouter) reservePrewarm(funcName string) bool {
 	r.prewarmMux.Lock()
 	defer r.prewarmMux.Unlock()

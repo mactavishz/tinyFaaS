@@ -696,8 +696,9 @@ func TestUpdateDeactivatesRouteIdempotently(t *testing.T) {
 	assert.Empty(t, route.ips)
 }
 
-// TestFilterAndRankPrewarmTargets verifies that only sync edges survive the
-// savings filter and per-call budget.
+// TestFilterAndRankPrewarmTargets verifies that only sync edges with sufficient
+// expected savings survive ranking. The per-call budget is applied later in
+// dispatchPrewarmTargets and is covered by the dispatch tests.
 func TestFilterAndRankPrewarmTargets(t *testing.T) {
 	r := NewInvocationRouter(nopLogger(), "development")
 	tuning := PrewarmTuning{
@@ -745,7 +746,7 @@ func TestFilterAndRankPrewarmTargets(t *testing.T) {
 		},
 	}
 
-	selection := r.selectPrewarmTargets(targets, tuning)
+	selection := r.rankPrewarmTargets(targets, tuning)
 	got := selection.targets
 	require.Len(t, got, 1)
 	assert.Equal(t, 2, selection.nonSync)
@@ -755,6 +756,133 @@ func TestFilterAndRankPrewarmTargets(t *testing.T) {
 	assert.Equal(t, 0, selection.limited)
 	assert.Equal(t, "se", got[0].FunctionName)
 	assert.Equal(t, callgraph.EdgeKindSync, got[0].Kind)
+}
+
+func TestDispatchPrewarmTargetsFiltersUnavailableBeforeLimit(t *testing.T) {
+	r := NewInvocationRouter(nopLogger(), "development")
+	executed := make(chan string, 2)
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		executed <- name
+		return nil
+	})
+
+	r.routingTable["active"] = &Route{isActive: true, callgraphEnabled: true}
+	r.routingTable["reserved"] = &Route{isActive: false, callgraphEnabled: true}
+	r.routingTable["fallback"] = &Route{isActive: false, callgraphEnabled: true}
+	r.routingTable["limited"] = &Route{isActive: false, callgraphEnabled: true}
+	require.True(t, r.reservePrewarm("reserved"))
+
+	targets := []callgraph.PrewarmTarget{
+		{FunctionName: "active", LeadTime: 100 * time.Millisecond, AvgColdStartDuration: 500 * time.Millisecond, Kind: callgraph.EdgeKindSync},
+		{FunctionName: "reserved", LeadTime: 100 * time.Millisecond, AvgColdStartDuration: 500 * time.Millisecond, Kind: callgraph.EdgeKindSync},
+		{FunctionName: "fallback", LeadTime: 100 * time.Millisecond, AvgColdStartDuration: 500 * time.Millisecond, Kind: callgraph.EdgeKindSync},
+		{FunctionName: "limited", LeadTime: 100 * time.Millisecond, AvgColdStartDuration: 500 * time.Millisecond, Kind: callgraph.EdgeKindSync},
+	}
+
+	dispatch := r.dispatchPrewarmTargets("caller", "call", "execution", targets, 1)
+	assert.Equal(t, 1, dispatch.scheduled)
+	assert.Equal(t, 1, dispatch.active)
+	assert.Equal(t, 1, dispatch.reserved)
+	assert.Equal(t, 1, dispatch.limited)
+
+	require.Eventually(t, func() bool {
+		return len(executed) == 1
+	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, "fallback", <-executed)
+}
+
+func TestDispatchPrewarmTargetsBackfillsReservationRace(t *testing.T) {
+	r := NewInvocationRouter(nopLogger(), "development")
+	executed := make(chan string, 2)
+	r.SetScaleUpHook(func(name string, cold bool) error {
+		executed <- name
+		return nil
+	})
+
+	r.routingTable["first"] = &Route{isActive: false, callgraphEnabled: true}
+	r.routingTable["backfill"] = &Route{isActive: false, callgraphEnabled: true}
+	targets := []callgraph.PrewarmTarget{
+		{FunctionName: "first", LeadTime: 100 * time.Millisecond, AvgColdStartDuration: 500 * time.Millisecond, Kind: callgraph.EdgeKindSync},
+		// Both snapshots are initially available. Scheduling the first target
+		// reserves it, so this duplicate simulates a reservation race.
+		{FunctionName: "first", LeadTime: 100 * time.Millisecond, AvgColdStartDuration: 500 * time.Millisecond, Kind: callgraph.EdgeKindSync},
+		{FunctionName: "backfill", LeadTime: 100 * time.Millisecond, AvgColdStartDuration: 500 * time.Millisecond, Kind: callgraph.EdgeKindSync},
+	}
+
+	dispatch := r.dispatchPrewarmTargets("caller", "call", "execution", targets, 2)
+	assert.Equal(t, 2, dispatch.scheduled)
+	assert.Equal(t, 1, dispatch.reserved)
+	assert.Zero(t, dispatch.limited)
+
+	require.Eventually(t, func() bool {
+		return len(executed) == 2
+	}, time.Second, 10*time.Millisecond)
+	got := []string{<-executed, <-executed}
+	assert.ElementsMatch(t, []string{"first", "backfill"}, got)
+}
+
+// TestPrewarmTuningEnabledGatesAsyncEdges verifies the sync-only filter is part
+// of the tuned policy: enabled skips async edges, disabled schedules them.
+func TestPrewarmTuningEnabledGatesAsyncEdges(t *testing.T) {
+	asyncTarget := callgraph.PrewarmTarget{
+		FunctionName:         "downstream",
+		Kind:                 callgraph.EdgeKindAsync,
+		LeadTime:             100 * time.Millisecond,
+		AvgColdStartDuration: 500 * time.Millisecond,
+	}
+
+	t.Run("enabled skips async", func(t *testing.T) {
+		r := NewInvocationRouter(nopLogger(), "development")
+		r.SetScaleUpHook(func(name string, cold bool) error { return nil })
+		r.routingTable["downstream"] = &Route{isActive: false, callgraphEnabled: true}
+
+		assert.Equal(t, prewarmTargetNonSync,
+			r.schedulePrewarmWithContext("caller", asyncTarget, "", ""))
+	})
+
+	t.Run("disabled schedules async", func(t *testing.T) {
+		r := NewInvocationRouter(nopLogger(), "development")
+		tuning := DefaultPrewarmTuning()
+		tuning.Enabled = false
+		r.SetPrewarmTuning(tuning)
+
+		executed := make(chan string, 1)
+		r.SetScaleUpHook(func(name string, cold bool) error { executed <- name; return nil })
+		r.routingTable["downstream"] = &Route{isActive: false, callgraphEnabled: true}
+
+		assert.Equal(t, prewarmTargetScheduled,
+			r.schedulePrewarmWithContext("caller", asyncTarget, "", ""))
+		require.Eventually(t, func() bool { return len(executed) == 1 }, time.Second, 10*time.Millisecond)
+		assert.Equal(t, "downstream", <-executed)
+	})
+}
+
+// TestPrewarmAllDownstreamIgnoresFiltersAndLimit verifies the untuned path
+// schedules every downstream target regardless of edge kind or per-call limit.
+func TestPrewarmAllDownstreamIgnoresFiltersAndLimit(t *testing.T) {
+	r := NewInvocationRouter(nopLogger(), "development")
+	tuning := DefaultPrewarmTuning()
+	tuning.Enabled = false
+	tuning.PerCallLimit = 1 // would cap to 1 when tuned; the untuned path must ignore it
+	tuning.Concurrency = 0  // uncapped, so all targets schedule deterministically
+	r.SetPrewarmTuning(tuning)
+
+	executed := make(chan string, 3)
+	r.SetScaleUpHook(func(name string, cold bool) error { executed <- name; return nil })
+	for _, n := range []string{"sync-a", "async-b", "async-c"} {
+		r.routingTable[n] = &Route{isActive: false, callgraphEnabled: true}
+	}
+	targets := []callgraph.PrewarmTarget{
+		{FunctionName: "sync-a", Kind: callgraph.EdgeKindSync, LeadTime: 100 * time.Millisecond, AvgColdStartDuration: 500 * time.Millisecond},
+		{FunctionName: "async-b", Kind: callgraph.EdgeKindAsync, LeadTime: 100 * time.Millisecond, AvgColdStartDuration: 500 * time.Millisecond},
+		{FunctionName: "async-c", Kind: callgraph.EdgeKindAsync, LeadTime: 100 * time.Millisecond, AvgColdStartDuration: 500 * time.Millisecond},
+	}
+
+	r.prewarmAllDownstream("caller", "call", "execution", targets)
+
+	require.Eventually(t, func() bool { return len(executed) == 3 }, time.Second, 10*time.Millisecond)
+	got := []string{<-executed, <-executed, <-executed}
+	assert.ElementsMatch(t, []string{"sync-a", "async-b", "async-c"}, got)
 }
 
 // TestPrewarmConcurrencyCapDropsExcessExecutions verifies the global semaphore
