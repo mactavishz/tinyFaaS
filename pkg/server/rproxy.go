@@ -26,7 +26,7 @@ type Route struct {
 
 // EdgeKindHeader is propagated by the gateway/queue worker to tell the router
 // whether the caller invoked the callee synchronously (/fn/) or asynchronously
-// (/async-fn/). It feeds the prewarm scheduler so async edges are deprioritised.
+// (/async-fn/). The prewarm scheduler only admits synchronous edges.
 const EdgeKindHeader = "X-Tinyfaas-Edge-Kind"
 
 // PrewarmTuning controls how the invocation router schedules prewarms.
@@ -35,8 +35,8 @@ type PrewarmTuning struct {
 	// Demand cold starts always bypass this cap.
 	Concurrency int
 	// PerCallLimit caps how many prewarms a single caller invocation may schedule.
-	// Targets are sorted by priority (sync first, then expected savings) and the
-	// first PerCallLimit are scheduled; the rest are dropped.
+	// Synchronous targets are sorted by expected savings and the first
+	// PerCallLimit are scheduled; the rest are dropped.
 	PerCallLimit int
 	// MinSavings is the minimum expected savings a prewarm target must offer
 	// to be considered. Targets with savings below this are skipped.
@@ -66,10 +66,7 @@ type prewarmAdmission struct {
 	rejection string
 }
 
-const (
-	prewarmRejectedConcurrency = "concurrency_budget_exhausted"
-	prewarmRejectedSyncReserve = "sync_capacity_reserved"
-)
+const prewarmRejectedConcurrency = "concurrency_budget_exhausted"
 
 func (a prewarmAttempt) logAttrs(extra ...any) []any {
 	attrs := []any{
@@ -108,9 +105,8 @@ type InvocationRouter struct {
 	httpClient      *http.Client
 	prewarmMux      sync.Mutex
 	prewarmInFlight map[string]struct{}
-	// prewarmSemaphore caps concurrent prewarm scale-ups (demand bypasses).
-	// nil disables the cap. Non-sync prewarms may use at most N-1 slots so
-	// synchronous critical-path work always has reserved capacity.
+	// prewarmSemaphore caps concurrent synchronous prewarm scale-ups (demand
+	// bypasses). nil disables the cap.
 	prewarmSemaphore chan struct{}
 	prewarmTuning    PrewarmTuning
 
@@ -585,9 +581,9 @@ func (r *InvocationRouter) GetTracker() callgraph.Tracker {
 //
 // The scheduler runs in three stages despite Docker's higher per-cold-start cost:
 //
-//  1. Filter out targets with insufficient expected savings or no useful data.
-//  2. Sort by priority: sync edges first (they sit on user-visible latency),
-//     then by expected savings descending.
+//  1. Exclude non-sync edges and targets with insufficient expected savings or
+//     no useful data.
+//  2. Sort by expected savings descending.
 //  3. Take the top PerCallLimit targets and dispatch them. Concurrent prewarms
 //     are further capped by a semaphore inside executePrewarm.
 func (r *InvocationRouter) prewarmDownstream(functionName string, callID string, executionID string) {
@@ -605,6 +601,7 @@ func (r *InvocationRouter) prewarmDownstream(functionName string, callID string,
 				"call_id", callID,
 				"execution_id", executionID,
 				"raw", len(rawTargets),
+				"rejected_non_sync", selection.nonSync,
 				"rejected_no_cold_data", selection.noColdData,
 				"rejected_invalid_lead", selection.invalidLead,
 				"rejected_low_savings", selection.lowSavings)
@@ -619,6 +616,7 @@ func (r *InvocationRouter) prewarmDownstream(functionName string, callID string,
 		"raw", len(rawTargets),
 		"eligible", len(selection.targets)+selection.limited,
 		"selected", len(selection.targets),
+		"rejected_non_sync", selection.nonSync,
 		"rejected_no_cold_data", selection.noColdData,
 		"rejected_invalid_lead", selection.invalidLead,
 		"rejected_low_savings", selection.lowSavings,
@@ -632,22 +630,22 @@ func (r *InvocationRouter) prewarmDownstream(functionName string, callID string,
 // rankedPrewarmTarget pairs a callgraph target with its computed scheduling
 // metadata so we don't have to recompute it during sorting.
 type rankedPrewarmTarget struct {
-	target   callgraph.PrewarmTarget
-	savings  time.Duration
-	syncEdge bool
+	target  callgraph.PrewarmTarget
+	savings time.Duration
 }
 
 type prewarmSelection struct {
 	targets     []callgraph.PrewarmTarget
+	nonSync     int
 	noColdData  int
 	invalidLead int
 	lowSavings  int
 	limited     int
 }
 
-// selectPrewarmTargets applies the savings filter, sorts targets so that sync
-// edges with the highest expected savings come first, and trims to the
-// per-call budget. It also returns compact rejection counts for tracing.
+// selectPrewarmTargets excludes non-sync edges, applies the savings filter,
+// sorts by expected savings, and trims to the per-call budget. It also returns
+// compact rejection counts for tracing.
 func (r *InvocationRouter) selectPrewarmTargets(targets []callgraph.PrewarmTarget, tuning PrewarmTuning) prewarmSelection {
 	selection := prewarmSelection{}
 	if len(targets) == 0 {
@@ -656,6 +654,11 @@ func (r *InvocationRouter) selectPrewarmTargets(targets []callgraph.PrewarmTarge
 
 	ranked := make([]rankedPrewarmTarget, 0, len(targets))
 	for _, t := range targets {
+		if t.Kind != callgraph.EdgeKindSync {
+			selection.nonSync++
+			continue
+		}
+
 		// Drop targets without cold-start data (we cannot estimate savings).
 		if t.AvgColdStartDuration <= 0 {
 			selection.noColdData++
@@ -690,18 +693,14 @@ func (r *InvocationRouter) selectPrewarmTargets(targets []callgraph.PrewarmTarge
 		}
 
 		ranked = append(ranked, rankedPrewarmTarget{
-			target:   t,
-			savings:  savings,
-			syncEdge: t.Kind == callgraph.EdgeKindSync,
+			target:  t,
+			savings: savings,
 		})
 	}
 
-	// Stable sort: sync first, then by expected savings descending, then by
-	// function name for determinism.
+	// Stable sort by expected savings descending, then by function name for
+	// determinism.
 	sort.SliceStable(ranked, func(i, j int) bool {
-		if ranked[i].syncEdge != ranked[j].syncEdge {
-			return ranked[i].syncEdge
-		}
 		if ranked[i].savings != ranked[j].savings {
 			return ranked[i].savings > ranked[j].savings
 		}
@@ -729,6 +728,14 @@ func (r *InvocationRouter) schedulePrewarm(caller string, target callgraph.Prewa
 }
 
 func (r *InvocationRouter) schedulePrewarmWithContext(caller string, target callgraph.PrewarmTarget, callID string, executionID string) {
+	if target.Kind != callgraph.EdgeKindSync {
+		r.logger.Debug("skipping prewarming - edge is not synchronous",
+			"caller", caller,
+			"target", target.FunctionName,
+			"kind", target.Kind)
+		return
+	}
+
 	now := time.Now()
 	attempt := prewarmAttempt{
 		id:          uuid.NewString(),
@@ -860,13 +867,9 @@ func (r *InvocationRouter) executePrewarm(funcName string) {
 }
 
 func (r *InvocationRouter) executePrewarmAttempt(attempt prewarmAttempt) {
-	admission := r.acquirePrewarmSlot(attempt.kind)
+	admission := r.acquirePrewarmSlot()
 	if admission.rejection != "" {
-		message := "prewarm dropped - concurrency budget exhausted"
-		if admission.rejection == prewarmRejectedSyncReserve {
-			message = "prewarm dropped - sync capacity reserved"
-		}
-		r.logger.Info(message, attempt.logAttrs(
+		r.logger.Info("prewarm dropped - concurrency budget exhausted", attempt.logAttrs(
 			"reason", admission.rejection,
 			"semaphore_used", admission.used,
 			"semaphore_capacity", admission.capacity,
@@ -895,10 +898,8 @@ func (r *InvocationRouter) executePrewarmAttempt(attempt prewarmAttempt) {
 	}
 }
 
-// acquirePrewarmSlot atomically applies global admission policy. Unknown edges
-// are treated like async edges: they may use spare capacity but cannot consume
-// the final slot reserved for known synchronous work.
-func (r *InvocationRouter) acquirePrewarmSlot(kind callgraph.EdgeKind) prewarmAdmission {
+// acquirePrewarmSlot atomically applies the global concurrency cap.
+func (r *InvocationRouter) acquirePrewarmSlot() prewarmAdmission {
 	r.prewarmMux.Lock()
 	defer r.prewarmMux.Unlock()
 
@@ -912,11 +913,6 @@ func (r *InvocationRouter) acquirePrewarmSlot(kind callgraph.EdgeKind) prewarmAd
 		used:      len(sem),
 		capacity:  cap(sem),
 	}
-	if kind != callgraph.EdgeKindSync && admission.used >= admission.capacity-1 {
-		admission.rejection = prewarmRejectedSyncReserve
-		return admission
-	}
-
 	select {
 	case sem <- struct{}{}:
 		return admission

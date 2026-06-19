@@ -93,7 +93,7 @@ func seedPrewarmTarget(tracker *callgraph.CallGraphTracker, caller string, targe
 		tracker.RecordScaleUp(caller, now, callerColdStart, true)
 	}
 	tracker.StartExecution(caller, requestID, executionID, now)
-	tracker.RecordEdge(caller, target, requestID, executionID, now.Add(leadTime))
+	tracker.RecordEdgeWithKind(caller, target, requestID, executionID, now.Add(leadTime), callgraph.EdgeKindSync)
 	tracker.EndExecution(caller, requestID, executionID, now.Add(leadTime+time.Millisecond))
 }
 
@@ -142,6 +142,7 @@ func TestSchedulePrewarmExecutesImmediatelyWhenDelayIsNonPositive(t *testing.T) 
 	r.schedulePrewarm("caller", callgraph.PrewarmTarget{
 		FunctionName: "test-func",
 		LeadTime:     100 * time.Millisecond,
+		Kind:         callgraph.EdgeKindSync,
 	})
 
 	require.Eventually(t, func() bool {
@@ -173,6 +174,7 @@ func TestSchedulePrewarmExecutesWhenDelayIsPositive(t *testing.T) {
 	r.schedulePrewarm("caller", callgraph.PrewarmTarget{
 		FunctionName: "test-func",
 		LeadTime:     200 * time.Millisecond,
+		Kind:         callgraph.EdgeKindSync,
 	})
 
 	require.Eventually(t, func() bool {
@@ -202,6 +204,7 @@ func TestSchedulePrewarmDeduplicatesSameTarget(t *testing.T) {
 	target := callgraph.PrewarmTarget{
 		FunctionName: "test-func",
 		LeadTime:     100 * time.Millisecond,
+		Kind:         callgraph.EdgeKindSync,
 	}
 	r.schedulePrewarm("caller", target)
 	r.schedulePrewarm("caller", target)
@@ -693,9 +696,8 @@ func TestUpdateDeactivatesRouteIdempotently(t *testing.T) {
 	assert.Empty(t, route.ips)
 }
 
-// TestFilterAndRankPrewarmTargets verifies the savings filter, sync-first
-// ordering, and per-call budget that mirrors faasd's behaviour while keeping
-// Docker daemon contention bounded.
+// TestFilterAndRankPrewarmTargets verifies that only sync edges survive the
+// savings filter and per-call budget.
 func TestFilterAndRankPrewarmTargets(t *testing.T) {
 	r := NewInvocationRouter(nopLogger(), "development")
 	tuning := PrewarmTuning{
@@ -721,14 +723,14 @@ func TestFilterAndRankPrewarmTargets(t *testing.T) {
 			Kind:                 callgraph.EdgeKindSync,
 		},
 		{
-			// Async, large savings: keep but ranked below sync.
+			// Async, large savings: exclude despite its potential savings.
 			FunctionName:         "ct",
 			LeadTime:             3000 * time.Millisecond,
 			AvgColdStartDuration: 800 * time.Millisecond,
 			Kind:                 callgraph.EdgeKindAsync,
 		},
 		{
-			// Async, also large: would be kept but trimmed by per-call limit.
+			// Async, also large: exclude.
 			FunctionName:         "cs",
 			LeadTime:             3000 * time.Millisecond,
 			AvgColdStartDuration: 800 * time.Millisecond,
@@ -745,15 +747,14 @@ func TestFilterAndRankPrewarmTargets(t *testing.T) {
 
 	selection := r.selectPrewarmTargets(targets, tuning)
 	got := selection.targets
-	require.Len(t, got, 2, "expected per-call limit to trim to 2 targets")
+	require.Len(t, got, 1)
+	assert.Equal(t, 2, selection.nonSync)
 	assert.Equal(t, 1, selection.noColdData)
 	assert.Equal(t, 0, selection.invalidLead)
 	assert.Equal(t, 1, selection.lowSavings)
-	assert.Equal(t, 1, selection.limited)
-	assert.Equal(t, "se", got[0].FunctionName, "sync target with biggest savings should rank first")
+	assert.Equal(t, 0, selection.limited)
+	assert.Equal(t, "se", got[0].FunctionName)
 	assert.Equal(t, callgraph.EdgeKindSync, got[0].Kind)
-	// Second slot goes to whichever async target sorted highest by savings then name.
-	assert.Equal(t, callgraph.EdgeKindAsync, got[1].Kind, "remaining slot should be async")
 }
 
 // TestPrewarmConcurrencyCapDropsExcessExecutions verifies the global semaphore
@@ -800,155 +801,72 @@ func TestPrewarmConcurrencyCapDropsExcessExecutions(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
-func TestPrewarmAdmissionReservesCapacityForSyncTargets(t *testing.T) {
+func TestSchedulePrewarmRejectsNonSyncEdges(t *testing.T) {
 	r := NewInvocationRouter(nopLogger(), "development")
-	r.SetPrewarmTuning(PrewarmTuning{
-		Concurrency:  2,
-		PerCallLimit: 5,
-		MinSavings:   0,
-		SafetyMargin: 50 * time.Millisecond,
-	})
-
-	release := make(chan struct{})
-	executed := make(chan string, 3)
-	r.SetScaleUpHook(func(name string, cold bool) error {
-		executed <- name
-		<-release
-		return nil
-	})
-
-	attempt := func(name string, kind callgraph.EdgeKind) prewarmAttempt {
-		now := time.Now()
-		return prewarmAttempt{
-			id:        "prewarm-" + name,
-			target:    name,
-			kind:      kind,
-			createdAt: now,
-			fireAt:    now,
-		}
-	}
-
-	for _, name := range []string{"async-a", "async-b", "sync-c"} {
-		require.True(t, r.reservePrewarm(name))
-	}
-
-	go r.executePrewarmAttempt(attempt("async-a", callgraph.EdgeKindAsync))
-	require.Eventually(t, func() bool {
-		return len(executed) == 1
-	}, time.Second, 10*time.Millisecond)
-
-	// A second async target must not consume the slot reserved for sync work.
-	r.executePrewarmAttempt(attempt("async-b", callgraph.EdgeKindAsync))
-	assert.Equal(t, 1, len(executed))
-	require.True(t, r.reservePrewarm("async-b"), "a rejected attempt must clear its reservation")
-	r.clearPrewarmReservation("async-b")
-
-	// Sync work can use the reserved slot while the first async prewarm runs.
-	go r.executePrewarmAttempt(attempt("sync-c", callgraph.EdgeKindSync))
-	require.Eventually(t, func() bool {
-		return len(executed) == 2
-	}, time.Second, 10*time.Millisecond)
-
-	close(release)
-}
-
-func TestPrewarmAdmissionCapacityOneIsSyncOnly(t *testing.T) {
-	r := NewInvocationRouter(nopLogger(), "development")
-	r.SetPrewarmTuning(PrewarmTuning{Concurrency: 1})
-
-	executed := make(chan string, 1)
+	executed := make(chan string, 2)
 	r.SetScaleUpHook(func(name string, cold bool) error {
 		executed <- name
 		return nil
 	})
+	r.routingTable["async"] = &Route{isActive: false, callgraphEnabled: true}
+	r.routingTable["unknown"] = &Route{isActive: false, callgraphEnabled: true}
 
-	now := time.Now()
-	require.True(t, r.reservePrewarm("async"))
-	r.executePrewarmAttempt(prewarmAttempt{
-		id:        "prewarm-async",
-		target:    "async",
-		kind:      callgraph.EdgeKindAsync,
-		createdAt: now,
-		fireAt:    now,
+	r.schedulePrewarm("caller", callgraph.PrewarmTarget{
+		FunctionName:         "async",
+		LeadTime:             time.Second,
+		AvgColdStartDuration: time.Second,
+		Kind:                 callgraph.EdgeKindAsync,
 	})
+	r.schedulePrewarm("caller", callgraph.PrewarmTarget{
+		FunctionName:         "unknown",
+		LeadTime:             time.Second,
+		AvgColdStartDuration: time.Second,
+		Kind:                 callgraph.EdgeKindUnknown,
+	})
+
 	assert.Empty(t, executed)
-
-	require.True(t, r.reservePrewarm("sync"))
-	r.executePrewarmAttempt(prewarmAttempt{
-		id:        "prewarm-sync",
-		target:    "sync",
-		kind:      callgraph.EdgeKindSync,
-		createdAt: now,
-		fireAt:    now,
-	})
-	assert.Equal(t, "sync", <-executed)
+	assert.Empty(t, r.prewarmInFlight, "non-sync edges must not create reservations")
 }
 
-// TestAcquirePrewarmSlot exercises the global admission policy directly so the
-// rejection reason codes and used/capacity reporting are pinned, including the
-// edges the behavioural tests don't reach (sync rejected when genuinely full,
-// and the disabled-cap path).
+// TestAcquirePrewarmSlot exercises the plain global concurrency cap directly.
 func TestAcquirePrewarmSlot(t *testing.T) {
 	tests := []struct {
 		name          string
 		concurrency   int
 		preFill       int // tokens to occupy before the call
-		kind          callgraph.EdgeKind
 		wantAdmitted  bool
 		wantRejection string
 		wantUsed      int
 		wantCapacity  int
 	}{
 		{
-			name:         "async admitted into spare capacity",
+			name:         "admitted below capacity",
 			concurrency:  2,
 			preFill:      0,
-			kind:         callgraph.EdgeKindAsync,
 			wantAdmitted: true,
 			wantUsed:     0,
 			wantCapacity: 2,
 		},
 		{
-			name:          "async rejected to reserve last slot for sync",
-			concurrency:   2,
-			preFill:       1,
-			kind:          callgraph.EdgeKindAsync,
-			wantRejection: prewarmRejectedSyncReserve,
-			wantUsed:      1,
-			wantCapacity:  2,
-		},
-		{
-			name:         "sync admitted into the reserved slot",
+			name:         "admitted into final slot",
 			concurrency:  2,
 			preFill:      1,
-			kind:         callgraph.EdgeKindSync,
 			wantAdmitted: true,
 			wantUsed:     1,
 			wantCapacity: 2,
 		},
 		{
-			name:          "sync rejected when genuinely full",
+			name:          "rejected when full",
 			concurrency:   2,
 			preFill:       2,
-			kind:          callgraph.EdgeKindSync,
 			wantRejection: prewarmRejectedConcurrency,
 			wantUsed:      2,
 			wantCapacity:  2,
 		},
 		{
-			name:          "async always rejected at capacity one",
-			concurrency:   1,
-			preFill:       0,
-			kind:          callgraph.EdgeKindAsync,
-			wantRejection: prewarmRejectedSyncReserve,
-			wantUsed:      0,
-			wantCapacity:  1,
-		},
-		{
 			name:         "disabled cap always admits",
 			concurrency:  0,
 			preFill:      0,
-			kind:         callgraph.EdgeKindAsync,
 			wantAdmitted: true,
 		},
 	}
@@ -961,7 +879,7 @@ func TestAcquirePrewarmSlot(t *testing.T) {
 				r.prewarmSemaphore <- struct{}{}
 			}
 
-			admission := r.acquirePrewarmSlot(tc.kind)
+			admission := r.acquirePrewarmSlot()
 
 			if tc.wantAdmitted {
 				assert.Empty(t, admission.rejection, "expected admission")
