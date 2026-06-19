@@ -2,7 +2,7 @@
 
 This repository contains a tinyFaaS fork used as a research prototype.
 
-tinyFaaS is a lightweight Function-as-a-Service platform focused on constrained environments. The platform currently runs as three services: gateway, manager, and reverse proxy (rproxy), plus per-function containers.
+tinyFaaS is a lightweight Function-as-a-Service platform focused on constrained environments. The platform runs as two services: the gateway and the merged server (which combines the former manager and reverse proxy responsibilities), plus per-function containers.
 
 ## Safety Notice
 
@@ -33,8 +33,8 @@ After installation, start the services with:
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable tf-gateway tf-rproxy tf-manager
-sudo systemctl start tf-gateway tf-rproxy tf-manager
+sudo systemctl enable tf-gateway tf-server
+sudo systemctl start tf-gateway tf-server
 ```
 
 Stop and uninstall services:
@@ -48,8 +48,7 @@ make down
 | Service | Default Bind | Purpose |
 | --- | --- | --- |
 | Gateway (`tf-gateway`) | `0.0.0.0:8080` | Public entrypoint. Routes `/fn/*` and `/system/*`. |
-| Manager (`tf-manager`) | `127.0.0.1:8001` | Deploy/list/delete/logs/scale/heartbeat control plane. |
-| RProxy (`tf-rproxy`) | `127.0.0.1:8000` | Invocation routing and callgraph/autoscaler integration. |
+| Server (`tf-server`) | `127.0.0.1:8000` | Merged control plane and data plane: deploy/list/delete/logs, invocation routing, and in-process callgraph/autoscaler integration. |
 
 Standard invocation path is through the gateway: `/fn/{name}`.
 
@@ -163,12 +162,12 @@ All endpoints below are exposed through gateway path prefix `/system`.
 
 ## Cold Start Readiness Semantics
 
-- During scale-up, manager startup waits for container readiness checks to complete before the function is considered running.
+- During scale-up, the server waits for container readiness checks to complete before the function is considered running.
 - Readiness checks require each replica to have:
   - a valid container IP on the function network
   - `GET /health` returning `200 OK` on port `8000`
 - Replica readiness checks run concurrently, but route activation still requires **all configured replicas** to become ready.
-- RProxy records callgraph edges only after a function route is confirmed ready for invocation. Failed cold-start attempts that cannot route traffic do not create edge records.
+- The server records callgraph edges only after a function route is confirmed ready for invocation. Failed cold-start attempts that cannot route traffic do not create edge records.
 
 ### `/system/upload` Metadata Schema
 
@@ -196,8 +195,7 @@ You can create a file at `/etc/default/tinyfaas` with environment variable overr
 | --- | --- | --- |
 | `GATEWAY_IP` | `0.0.0.0` | Gateway bind address. |
 | `GATEWAY_PORT` | `8080` | Gateway port. |
-| `MANAGER_PORT` | `8001` | Manager port (loopback). |
-| `RPROXY_PORT` | `8000` | RProxy port (loopback). |
+| `TINYFAAS_SERVER_PORT` | `8000` | Merged server port (loopback). |
 | `ENV` | `development` | `development` enables callgraph debug endpoints. |
 | `BACKEND` | `docker` | Runtime backend. |
 | `AUTOSCALER_ENABLED` | `true` | Enable autoscaler integration. |
@@ -212,15 +210,14 @@ You can create a file at `/etc/default/tinyfaas` with environment variable overr
 Check service status:
 
 ```sh
-sudo systemctl status tf-gateway tf-rproxy tf-manager
+sudo systemctl status tf-gateway tf-server
 ```
 
 Stream logs:
 
 ```sh
 sudo journalctl -u tf-gateway -o cat -f
-sudo journalctl -u tf-rproxy -o cat -f
-sudo journalctl -u tf-manager -o cat -f
+sudo journalctl -u tf-server -o cat -f
 ```
 
 ## Testing
@@ -243,7 +240,7 @@ You can override gateway URL for integration tests with `TINYFAAS_TEST_GATEWAY_U
 
 | Command | Description |
 | --- | --- |
-| `make build` | Build `tf-manager`, `tf-rproxy`, `tf-gateway`. |
+| `make build` | Build `tf-server`, `tf-gateway`. |
 | `make build-runtime-images` | Pre-build runtime base images. |
 | `make install` | Install binaries and `systemd` units. |
 | `make down` | Stop services, uninstall binaries/units, and clean artifacts. |

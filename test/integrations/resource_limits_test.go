@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
+	"github.com/OpenFogStack/tinyFaaS/pkg/server"
 	testutil "github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/tests/integration/helpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -62,9 +62,9 @@ func TestResourceLimitsInDocker(t *testing.T) {
 
 	cpuLimit := "50m"
 	memLimit := "96Mi"
-	expectedNano, err := manager.ParseCPUNano(cpuLimit)
+	expectedNano, err := server.ParseCPUNano(cpuLimit)
 	require.NoError(t, err)
-	expectedMemBytes, err := manager.ParseMemoryBytes(memLimit)
+	expectedMemBytes, err := server.ParseMemoryBytes(memLimit)
 	require.NoError(t, err)
 
 	testutil.DeployTinyFaaSStackFilterWithEnvs(t, baseURL, stackPath, fnName, map[string]string{
@@ -187,9 +187,9 @@ func dockerStatsMemUsage(t *testing.T, containerID string) (usedBytes int64, lim
 		limitStr = f[0]
 	}
 
-	used, err := manager.ParseMemoryBytes(usedStr)
+	used, err := server.ParseMemoryBytes(usedStr)
 	require.NoError(t, err, "failed to parse used memory from %q", usedStr)
-	limit, err := manager.ParseMemoryBytes(limitStr)
+	limit, err := server.ParseMemoryBytes(limitStr)
 	require.NoError(t, err, "failed to parse memory limit from %q", limitStr)
 	return used, limit
 }
@@ -218,11 +218,11 @@ func firstInt64(out string) (int64, bool) {
 	return 0, false
 }
 
-func getFunctionFromSystemList(t *testing.T, baseURL string, name string) manager.FunctionConfig {
+func getFunctionFromSystemList(t *testing.T, baseURL string, name string) server.FunctionConfig {
 	t.Helper()
 
 	body := testutil.TinyFaaSSystemList(t, baseURL)
-	out := make([]manager.FunctionConfig, 0)
+	out := make([]server.FunctionConfig, 0)
 	require.NoError(t, json.Unmarshal(body, &out), "invalid list JSON: %s", string(body))
 
 	for _, fn := range out {
@@ -232,5 +232,5 @@ func getFunctionFromSystemList(t *testing.T, baseURL string, name string) manage
 	}
 
 	t.Fatalf("function %q not found in /system/list", name)
-	return manager.FunctionConfig{}
+	return server.FunctionConfig{}
 }

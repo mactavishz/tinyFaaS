@@ -61,7 +61,7 @@ func TestRecordInvocationStatsMiddleware(t *testing.T) {
 }
 
 func TestHandleFunctionStats(t *testing.T) {
-	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tfServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/function/echo" {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"name":"echo"}`))
@@ -69,14 +69,14 @@ func TestHandleFunctionStats(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
-	defer manager.Close()
+	defer tfServer.Close()
 
-	_, port, err := net.SplitHostPort(manager.Listener.Addr().String())
+	_, port, err := net.SplitHostPort(tfServer.Listener.Addr().String())
 	if err != nil {
 		t.Fatalf("split host port failed: %v", err)
 	}
 
-	g := New(nopLogger(), WithManagerPort(port))
+	g := New(nopLogger(), WithServerPort(port))
 	g.stats.Record("echo", InvocationRecord{StatusCode: 200, Success: true, Method: http.MethodPost, Path: "/fn/echo"})
 
 	req := httptest.NewRequest(http.MethodGet, "/system/stats/function/echo", nil)

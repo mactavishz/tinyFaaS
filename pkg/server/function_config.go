@@ -1,4 +1,4 @@
-package manager
+package server
 
 type FunctionConfig struct {
 	Name            string            `json:"name"`

@@ -1,6 +1,7 @@
 [Unit]
 Description=tinyFaaS Gateway
-After=network.target
+After=network.target tf-server.service
+Wants=tf-server.service
 
 [Service]
 Type=simple

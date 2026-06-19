@@ -1,13 +1,13 @@
 [Unit]
-Description=tinyFaaS Manager Service
+Description=tinyFaaS Server (merged manager + reverse proxy)
 Documentation=https://github.com/OpenFogStack/tinyFaaS
-After=network.target docker.service tf-rproxy.service
-Requires=docker.service tf-rproxy.service
+After=network.target docker.service
+Requires=docker.service
 
 [Service]
 Type=simple
 ExecStartPre=/bin/mkdir -p /var/lib/tinyfaas/tmp
-ExecStart=/usr/local/bin/tf-manager
+ExecStart=/usr/local/bin/tf-server
 Restart=on-failure
 RestartSec=5
 
@@ -20,7 +20,7 @@ WorkingDirectory=/var/lib/tinyfaas
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=tf-manager
+SyslogIdentifier=tf-server
 
 [Install]
 WantedBy=multi-user.target

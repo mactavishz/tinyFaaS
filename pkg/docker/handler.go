@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"sync"
 	"time"
@@ -30,10 +29,9 @@ const (
 
 	functionLogDriver = "journald"
 
-	containerReadyTimeout         = 10 * time.Second
+	containerReadyTimeout         = 60 * time.Second
+	containerReadyInterval        = 25 * time.Millisecond
 	containerHealthRequestTimeout = 100 * time.Millisecond
-	containerHealthInitialDelay   = 50 * time.Millisecond
-	containerHealthMaxDelay       = 250 * time.Millisecond
 )
 
 // List of supported runtimes (must match directories in pkg/docker/runtimes)
@@ -359,21 +357,13 @@ func (dh *dockerHandler) waitForContainerReady(ip string, containerID string, ti
 			"ip", ip,
 			"err", err,
 		)
+		attempt++
 
 		if time.Now().After(deadline) {
 			return fmt.Errorf("container %s failed readiness checks after %s: %w", util.GetShortID(containerID), timeout, lastErr)
 		}
 
-		delay := readinessBackoffDelay(attempt)
-		attempt++
-		remaining := time.Until(deadline)
-		if delay > remaining {
-			delay = remaining
-		}
-
-		if delay > 0 {
-			time.Sleep(delay)
-		}
+		time.Sleep(containerReadyInterval)
 	}
 }
 
@@ -394,28 +384,6 @@ func (dh *dockerHandler) probeContainerHealth(ip string) error {
 	}
 
 	return nil
-}
-
-// Calculate exponential backoff with full jitter for readiness checks
-func readinessBackoffDelay(attempt int) time.Duration {
-	delay := containerHealthInitialDelay
-
-	// Calculate exponential backoff
-	// Ensure we don't overflow before capping at MaxDelay
-	for i := 0; i < attempt && delay < containerHealthMaxDelay; i++ {
-		delay *= 2
-	}
-
-	if delay > containerHealthMaxDelay {
-		delay = containerHealthMaxDelay
-	}
-
-	// Apply Full Jitter
-	// rand.Int64n returns a value in [0, delay)
-	if delay <= 0 {
-		return 0
-	}
-	return time.Duration(rand.Int63n(int64(delay)))
 }
 
 func (dh *dockerHandler) removeContainers() error {

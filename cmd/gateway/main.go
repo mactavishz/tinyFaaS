@@ -27,12 +27,8 @@ func main() {
 	// Create gateway instance with options
 	var opts []gateway.Option
 
-	if rproxyPort := os.Getenv("RPROXY_PORT"); rproxyPort != "" {
-		opts = append(opts, gateway.WithRProxyPort(rproxyPort))
-	}
-
-	if managerPort := os.Getenv("MANAGER_PORT"); managerPort != "" {
-		opts = append(opts, gateway.WithManagerPort(managerPort))
+	if serverPort := os.Getenv("TINYFAAS_SERVER_PORT"); serverPort != "" {
+		opts = append(opts, gateway.WithServerPort(serverPort))
 	}
 
 	// Get mode from environment variable
@@ -60,8 +56,7 @@ func main() {
 	go func() {
 		logger.Info("tinyFaaS Gateway starting",
 			"address", addr,
-			"rproxyPort", g.GetRProxyPort(),
-			"managerPort", g.GetManagerPort())
+			"serverPort", g.GetServerPort())
 
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("gateway failed to start", "err", err)

@@ -8,7 +8,7 @@ import (
 	"path"
 	"time"
 
-	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
+	"github.com/OpenFogStack/tinyFaaS/pkg/server"
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 	"github.com/google/uuid"
 	"github.com/moby/go-archive"
@@ -113,7 +113,7 @@ func (db *DockerBackend) getRuntimeBaseImage(runtime string) string {
 	return fmt.Sprintf("tinyfaas-runtime-%s", runtime)
 }
 
-func (db *DockerBackend) Create(name string, env string, replicas int, filedir string, envs map[string]string, labels map[string]string, limits manager.ResourceLimits) (manager.Handler, error) {
+func (db *DockerBackend) Create(name string, env string, replicas int, filedir string, envs map[string]string, labels map[string]string, limits server.ResourceLimits) (server.Handler, error) {
 
 	// make a unique function name by appending uuid string to function name
 	ctx := context.Background()
