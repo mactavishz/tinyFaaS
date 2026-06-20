@@ -440,7 +440,8 @@ func TestScaleUpRecordsOnlyClaimingPrewarmDuringDemandRace(t *testing.T) {
 
 	prewarmDone := make(chan error, 1)
 	go func() {
-		prewarmDone <- s.ScaleUp("echo", false)
+		_, err := s.ScaleUp("echo", false)
+		prewarmDone <- err
 	}()
 	require.Eventually(t, func() bool {
 		select {
@@ -453,7 +454,8 @@ func TestScaleUpRecordsOnlyClaimingPrewarmDuringDemandRace(t *testing.T) {
 
 	demandDone := make(chan error, 1)
 	go func() {
-		demandDone <- s.ScaleUp("echo", true)
+		_, err := s.ScaleUp("echo", true)
+		demandDone <- err
 	}()
 
 	close(restartRelease)
@@ -488,7 +490,8 @@ func TestScaleUpRecordsOnlyClaimingDemandDuringPrewarmRace(t *testing.T) {
 
 	demandDone := make(chan error, 1)
 	go func() {
-		demandDone <- s.ScaleUp("echo", true)
+		_, err := s.ScaleUp("echo", true)
+		demandDone <- err
 	}()
 	require.Eventually(t, func() bool {
 		select {
@@ -501,7 +504,8 @@ func TestScaleUpRecordsOnlyClaimingDemandDuringPrewarmRace(t *testing.T) {
 
 	prewarmDone := make(chan error, 1)
 	go func() {
-		prewarmDone <- s.ScaleUp("echo", false)
+		_, err := s.ScaleUp("echo", false)
+		prewarmDone <- err
 	}()
 
 	close(restartRelease)
@@ -527,7 +531,9 @@ func TestScaleUpActiveFunctionDoesNotRecordScaleUp(t *testing.T) {
 	s.functionConfigs["echo"] = FunctionConfig{Name: "echo", Running: true}
 	as.RegisterFunctionWithState("echo", map[string]string{"com.tinyfaas.scale.zero": "true"}, autoscaler.StateActive)
 
-	require.NoError(t, s.ScaleUp("echo", true))
+	performed, err := s.ScaleUp("echo", true)
+	require.NoError(t, err)
+	assert.False(t, performed, "an already-active function performs no transition")
 
 	assert.Equal(t, 0, handler.restartCount())
 	assert.Empty(t, tracker.scaleUpRecords())

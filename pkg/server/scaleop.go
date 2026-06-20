@@ -5,8 +5,6 @@ import (
 	"time"
 
 	"log/slog"
-
-	"github.com/mactavishz/FaaS-Platform-Knowledge-Optimization/autoscaler"
 )
 
 // TinyFaaSScaleOp implements the autoscaler.ScaleOperation interface for the
@@ -95,54 +93,43 @@ func (op *TinyFaaSScaleOp) ScaleUp(functionName string) error {
 // ScaleUp scales up a function and records the scale-up time to the callgraph
 // tracker. cold=true means this is a user-facing cold start; cold=false means a
 // proactive prewarm.
-func (s *Server) ScaleUp(functionName string, cold bool) error {
+// ScaleUp ensures a function's runtime is available and reports whether THIS
+// call performed the scaled-down -> active transition. A demand-driven cold start
+// (cold=true) blocks until the function is ready; a speculative prewarm
+// (cold=false) is opportunistic and returns immediately if another caller is
+// already scaling the function, so it never occupies a prewarm slot waiting on
+// work it did not initiate. Only the caller that performed the transition records
+// the scale-up, with its own mode.
+func (s *Server) ScaleUp(functionName string, cold bool) (bool, error) {
 	if !s.autoscalerEnabled() {
-		return fmt.Errorf("autoscaler not enabled")
+		return false, fmt.Errorf("autoscaler not enabled")
 	}
 
-	recordScaleUp := s.claimScaleUpRecord(functionName)
 	startTime := time.Now()
-	if recordScaleUp {
-		defer s.releaseScaleUpRecord(functionName)
+
+	var performed bool
+	var err error
+	if cold {
+		performed, err = s.autoscaler.ScaleUpWhenReady(functionName)
+	} else {
+		performed, err = s.autoscaler.TryScaleUp(functionName)
+	}
+	if err != nil {
+		return false, err
 	}
 
-	if err := s.autoscaler.ScaleUpWhenReady(functionName); err != nil {
-		return err
+	if !performed {
+		return false, nil
 	}
 
 	scaleUpDuration := time.Since(startTime)
-
-	if recordScaleUp {
-		s.recordScaleUp(functionName, startTime, scaleUpDuration, cold)
-	}
-
+	s.recordScaleUp(functionName, startTime, scaleUpDuration, cold)
 	s.logger.Info("scale-up completed",
 		"function", functionName,
 		"cold", cold,
 		"duration", scaleUpDuration)
 
-	return nil
-}
-
-func (s *Server) claimScaleUpRecord(functionName string) bool {
-	state, ok := s.autoscaler.GetState(functionName)
-	if !ok || state != autoscaler.StateScaledDown {
-		return false
-	}
-
-	s.mux.Lock()
-	defer s.mux.Unlock()
-	if _, exists := s.scaleUpClaims[functionName]; exists {
-		return false
-	}
-	s.scaleUpClaims[functionName] = struct{}{}
-	return true
-}
-
-func (s *Server) releaseScaleUpRecord(functionName string) {
-	s.mux.Lock()
-	delete(s.scaleUpClaims, functionName)
-	s.mux.Unlock()
+	return true, nil
 }
 
 // StartRequest marks a function as blocked while serving a request.

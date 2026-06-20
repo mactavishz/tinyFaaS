@@ -105,7 +105,6 @@ type Server struct {
 	mux              sync.Mutex
 	functionHandlers map[string]Handler
 	functionConfigs  map[string]FunctionConfig
-	scaleUpClaims    map[string]struct{}
 
 	// Routing state (request dispatch)
 	routingTableMux     sync.RWMutex
@@ -119,6 +118,11 @@ type Server struct {
 	// prewarmSem bounds concurrent speculative prewarm scale-ups so they
 	// cannot starve request-path cold starts (best-effort, non-blocking).
 	prewarmSem chan struct{}
+
+	// prewarmInFlight collapses duplicate prewarm attempts for the same target
+	// (e.g. eager + scheduled) so they do not each consume a global prewarm slot
+	// for what the autoscaler coalesces into a single scale-up.
+	prewarmInFlight sync.Map
 }
 
 // New creates a new merged server.
@@ -130,7 +134,6 @@ func New(id string, mode string, tfBackend Backend, logger *slog.Logger) *Server
 		logger:              logger,
 		functionHandlers:    make(map[string]Handler),
 		functionConfigs:     make(map[string]FunctionConfig),
-		scaleUpClaims:       make(map[string]struct{}),
 		routingTable:        make(map[string]*Route),
 		reverseRoutingTable: make(map[string]string),
 		prewarmSem:          make(chan struct{}, maxConcurrentPrewarms()),
@@ -410,7 +413,7 @@ func (s *Server) invoke(name string, payload []byte, header http.Header, startTi
 		}
 
 		// cold=true since this is triggered by a user request
-		if err := s.ScaleUp(name, true); err != nil {
+		if _, err := s.ScaleUp(name, true); err != nil {
 			s.logger.Error("failed to trigger cold start", "name", name, "err", err)
 			return http.StatusServiceUnavailable, nil
 		}
@@ -632,24 +635,13 @@ func (s *Server) isScaledDown(name string) bool {
 	return exists && !route.isActive
 }
 
-// startEagerPrewarm executes an eager prewarm under the concurrency budget. It is
-// best-effort: if the budget is exhausted it skips rather than queues, so
-// speculative work never competes with request-path cold starts.
+// startEagerPrewarm kicks off an eager prewarm. Admission control (the shared
+// prewarm budget) is enforced in executePrewarm, so eager and scheduled prewarms
+// compete for the same global budget.
 func (s *Server) startEagerPrewarm(caller, target string, delay time.Duration, scheduled bool) {
-	select {
-	case s.prewarmSem <- struct{}{}:
-	default:
-		s.logger.Info("skipping eager prewarm - budget exhausted",
-			"caller", caller, "target", target)
-		return
-	}
-
-	go func() {
-		defer func() { <-s.prewarmSem }()
-		s.logger.Info("eager prewarm during cold start",
-			"caller", caller, "target", target, "delay", delay, "scheduled", scheduled)
-		s.executePrewarm(target)
-	}()
+	s.logger.Info("eager prewarm during cold start",
+		"caller", caller, "target", target, "delay", delay, "scheduled", scheduled)
+	go s.executePrewarm(target)
 }
 
 // schedulePrewarm schedules a prewarm operation for a target function so that it
@@ -719,14 +711,39 @@ func (s *Server) schedulePrewarm(caller string, target callgraph.PrewarmTarget) 
 
 // executePrewarm performs the actual prewarm operation for a function.
 func (s *Server) executePrewarm(funcName string) {
-	if err := s.ScaleUp(funcName, false); err != nil {
+	// Per-target admission first: if a prewarm for this function is already in
+	// flight, skip -- otherwise duplicate attempts (eager + scheduled) would each
+	// take a global slot for a scale-up the autoscaler coalesces into one.
+	if _, inFlight := s.prewarmInFlight.LoadOrStore(funcName, struct{}{}); inFlight {
+		return
+	}
+	defer s.prewarmInFlight.Delete(funcName)
+
+	// Global admission control for all speculative prewarms (eager and scheduled
+	// alike). Best-effort: if the budget is exhausted, skip rather than queue, so
+	// speculative work never competes with request-path cold starts. The
+	// request-path cold start (ScaleUp with cold=true) does not go through here and
+	// is never throttled.
+	select {
+	case s.prewarmSem <- struct{}{}:
+	default:
+		s.logger.Info("skipping prewarm - budget exhausted", "function", funcName)
+		return
+	}
+	defer func() { <-s.prewarmSem }()
+
+	performed, err := s.ScaleUp(funcName, false)
+	if err != nil {
 		s.logger.Info("prewarm downstream function failed",
 			"function", funcName,
 			"err", err)
-	} else {
+	} else if performed {
 		s.logger.Info("prewarm downstream function completed",
 			"function", funcName)
 	}
+	// performed=false with no error means another caller was already scaling this
+	// function (demand or another prewarm); nothing was done, so do not log a
+	// completion.
 }
 
 // ---------------------------------------------------------------------------
