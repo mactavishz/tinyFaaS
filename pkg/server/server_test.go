@@ -581,6 +581,42 @@ func TestPrewarmDownstreamEagerWarmsScaledDownTargets(t *testing.T) {
 	assert.Equal(t, 0, s.functionHandlers["se"].(*testHandler).restartCount(), "already-active callee must not be prewarmed")
 }
 
+func TestPrewarmDownstreamEagerSchedulesWhenRunwayAllows(t *testing.T) {
+	backend := newTestBackend()
+	s := newServer(t, backend)
+	tracker := newRecordingTracker()
+	tracker.prewarmEnabled = true
+	// delay = callerCold + leadTime - calleeCold - margin = 200 + 200 - 100 - 50 = 250ms > 0
+	// so the warm must be scheduled (not fired immediately).
+	tracker.prewarmTargets = map[string][]callgraph.PrewarmTarget{
+		"iot-i": {
+			{
+				FunctionName:            "cw",
+				Kind:                    callgraph.EdgeKindSync,
+				LeadTime:                200 * time.Millisecond,
+				AvgColdStartDuration:    100 * time.Millisecond,
+				CallerColdStartDuration: 200 * time.Millisecond,
+			},
+		},
+	}
+	s.SetTracker(tracker)
+	as := installAutoScaler(s)
+
+	s.functionHandlers["cw"] = &testHandler{name: "cw", ips: []string{"10.0.0.9"}}
+	s.functionConfigs["cw"] = FunctionConfig{Name: "cw"}
+	s.routingTable["cw"] = &Route{ips: []string{"10.0.0.9"}, isActive: false, callgraphEnabled: true}
+	as.RegisterFunctionWithState("cw", map[string]string{"com.tinyfaas.scale.zero": "true"}, autoscaler.StateScaledDown)
+
+	s.prewarmDownstreamEager("iot-i")
+
+	// Not warmed synchronously: the warm is deferred via the computed delay.
+	assert.Equal(t, 0, s.functionHandlers["cw"].(*testHandler).restartCount(), "warm should be scheduled, not immediate")
+	// But it is warmed once the scheduled delay elapses.
+	require.Eventually(t, func() bool {
+		return s.functionHandlers["cw"].(*testHandler).restartCount() == 1
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
 func TestGetReturnsFunctionConfig(t *testing.T) {
 	backend := newTestBackend()
 	s := newServer(t, backend)

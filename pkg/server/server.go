@@ -41,6 +41,10 @@ const (
 	// speculative work never piles up against request-path cold starts.
 	// Overridable via TINYFAAS_MAX_CONCURRENT_PREWARMS.
 	defaultMaxConcurrentPrewarms = 3
+
+	// prewarmSafetyMargin is subtracted from a prewarm's computed lead time so the
+	// function is ready slightly before it is actually needed.
+	prewarmSafetyMargin = 50 * time.Millisecond
 )
 
 // maxConcurrentPrewarms reads the prewarm concurrency budget from the
@@ -387,24 +391,22 @@ func (s *Server) invoke(name string, payload []byte, header http.Header, startTi
 
 	s.logger.Debug("found function route", "ips", calleeRoute.ips, "active", calleeRoute.isActive)
 
-	// prewarmTriggered records whether downstream prewarming has already been
-	// kicked off for this invocation, so we do not trigger it twice.
-	prewarmTriggered := false
-
 	// Check if function is scaled down and trigger cold start if needed
 	if s.autoscalerEnabled() && !calleeRoute.isActive {
 		s.logger.Info("function is scaled down, triggering cold start", "name", name)
 
 		// The caller's own cold start is otherwise-idle time during which we can
-		// warm its predicted downstream functions. Kick this off *before*
-		// blocking on the caller's scale-up so the downstream containers start in
-		// parallel and are ready (or nearly so) by the time the caller begins
-		// executing and dispatches to them. This is what makes prewarming pay off
-		// on the synchronous critical path, where the caller->callee lead time is
-		// otherwise too small to schedule a prewarm against.
+		// warm its predicted synchronous downstream functions. Kick this off
+		// *before* blocking on the caller's scale-up so the downstream containers
+		// start in parallel and are ready (or nearly so) by the time the caller
+		// begins executing and dispatches to them. This is what makes prewarming
+		// pay off on the synchronous critical path, where the caller->callee lead
+		// time is otherwise too small to schedule a prewarm against. The regular
+		// scheduled path below still runs (covering async callees and any sync
+		// callee the eager budget skipped); already-active targets are skipped
+		// there, so the two paths do not duplicate work.
 		if calleeRoute.callgraphEnabled && s.tracker != nil && s.tracker.PrewarmEnabled() {
 			go s.prewarmDownstreamEager(name)
-			prewarmTriggered = true
 		}
 
 		// cold=true since this is triggered by a user request
@@ -468,11 +470,13 @@ func (s *Server) invoke(name string, payload []byte, header http.Header, startTi
 
 	s.logger.Debug("chosen function ip", "ip", ip)
 
-	// Trigger prewarming for downstream functions (fire-and-forget, non-blocking).
-	// Prewarming requires both callgraph and autoscaler to be enabled. When the
-	// callee was just cold-started we already kicked off eager prewarming above,
-	// so skip the scheduled path here to avoid triggering it twice.
-	if !prewarmTriggered && calleeRoute.callgraphEnabled && s.autoscalerEnabled() && s.tracker != nil && s.tracker.PrewarmEnabled() {
+	// Trigger scheduled prewarming for downstream functions (fire-and-forget,
+	// non-blocking). Prewarming requires both callgraph and autoscaler to be
+	// enabled. This runs even when eager prewarming was kicked off above: the
+	// scheduled path covers async callees and any sync callee the eager budget
+	// skipped, and it skips already-active targets so the two paths do not
+	// duplicate work.
+	if calleeRoute.callgraphEnabled && s.autoscalerEnabled() && s.tracker != nil && s.tracker.PrewarmEnabled() {
 		go s.prewarmDownstream(name)
 	}
 
@@ -543,20 +547,24 @@ func (s *Server) prewarmDownstream(functionName string) {
 }
 
 // prewarmDownstreamEager warms the predicted downstream functions of a caller
-// that is itself currently cold-starting. Unlike schedulePrewarm, it fires
-// immediately instead of computing a delay against the recorded lead time: the
-// caller's in-progress cold start *is* the lead time, and it is typically far
-// larger than the small caller->callee gap seen once the caller is warm. This
-// is what lets prewarming help the synchronous critical path on a lean runtime,
-// where that gap (e.g. ~60ms) is otherwise too short to schedule against.
+// that is itself currently cold-starting. It is the eager counterpart of
+// schedulePrewarm: because it fires while the caller is still cold-starting, it
+// has the caller's own cold start as *extra* lead time. The just-in-time fire
+// delay is therefore:
 //
-// Only synchronous (and as-yet-unclassified) callees are warmed: they sit on
-// the caller's user-visible critical path, whereas async callees are not waited
-// on and would only add container-start contention to the caller's own
-// in-flight cold start. The most imminent callee is warmed first, and warms are
-// bounded by prewarmSem and skipped (not queued) when the budget is exhausted,
-// to limit how much they contend with the request-path cold start. Should be
-// called asynchronously (fire-and-forget).
+//	delay = callerColdStart + leadTime - calleeColdStart - margin
+//
+// If that is <= 0 the callee cannot be ready in time by waiting, so it is warmed
+// immediately; otherwise it is scheduled to fire just before it is needed. On a
+// lean runtime where the caller calls its first downstream almost immediately,
+// the caller-cold-start term is what gives the warm a chance to land in time.
+//
+// Only synchronous (and as-yet-unclassified) callees are warmed here: they sit
+// on the caller's user-visible critical path, whereas async callees are not
+// waited on and would only add contention to the caller's own in-flight cold
+// start (the regular scheduled path still covers them). The most imminent callee
+// is warmed first, and warms are bounded by prewarmSem (skipped, not queued,
+// when exhausted). Should be called asynchronously (fire-and-forget).
 func (s *Server) prewarmDownstreamEager(functionName string) {
 	targets := s.tracker.GetPrewarmTargets(functionName)
 	if len(targets) == 0 {
@@ -578,46 +586,70 @@ func (s *Server) prewarmDownstreamEager(functionName string) {
 		// Skip asynchronous callees. The caller does not block on them, so they
 		// are not on its user-visible critical path; warming them here would only
 		// add container-start contention to the caller's own in-flight cold start
-		// for no measurable benefit. They are cold-started on their own dispatch
-		// path (and may still be scheduled via the regular prewarm path when the
-		// caller is warm). EdgeKindUnknown is treated as potentially-critical and
-		// kept.
+		// for no measurable benefit. The regular scheduled path still covers them.
+		// EdgeKindUnknown is treated as potentially-critical and kept.
 		if target.Kind == callgraph.EdgeKindAsync {
 			continue
 		}
 
-		if !s.CallgraphEnabled(target.FunctionName) {
+		if !s.CallgraphEnabled(target.FunctionName) || !s.isScaledDown(target.FunctionName) {
 			continue
 		}
 
-		s.routingTableMux.RLock()
-		route, exists := s.routingTable[target.FunctionName]
-		isScaledDown := exists && !route.isActive
-		s.routingTableMux.RUnlock()
-		if !isScaledDown {
+		// The caller's own cold start is extra lead time on top of the edge gap.
+		delay := target.CallerColdStartDuration + target.LeadTime - target.AvgColdStartDuration - prewarmSafetyMargin
+
+		if delay <= 0 {
+			// Cannot be ready by waiting -- warm it now.
+			s.startEagerPrewarm(functionName, target.FunctionName, delay, false)
 			continue
 		}
 
-		// Best-effort: if the prewarm budget is exhausted, skip rather than
-		// queue, so speculative work never competes with request-path cold
-		// starts.
-		select {
-		case s.prewarmSem <- struct{}{}:
-		default:
-			s.logger.Info("skipping eager prewarm - budget exhausted",
-				"caller", functionName,
-				"target", target.FunctionName)
-			continue
-		}
-
-		go func(target string) {
-			defer func() { <-s.prewarmSem }()
-			s.logger.Info("eager prewarm during cold start",
-				"caller", functionName,
-				"target", target)
-			s.executePrewarm(target)
-		}(target.FunctionName)
+		// Enough runway to warm just in time. Schedule it, acquiring the budget at
+		// fire time (not now) so the slot is not held during the wait.
+		s.logger.Info("scheduling eager prewarm",
+			"caller", functionName,
+			"target", target.FunctionName,
+			"callerColdStart", target.CallerColdStartDuration,
+			"leadTime", target.LeadTime,
+			"calleeColdStart", target.AvgColdStartDuration,
+			"delay", delay)
+		tname := target.FunctionName
+		time.AfterFunc(delay, func() {
+			if !s.isScaledDown(tname) {
+				return
+			}
+			s.startEagerPrewarm(functionName, tname, delay, true)
+		})
 	}
+}
+
+// isScaledDown reports whether a function has a route that is currently inactive.
+func (s *Server) isScaledDown(name string) bool {
+	s.routingTableMux.RLock()
+	route, exists := s.routingTable[name]
+	s.routingTableMux.RUnlock()
+	return exists && !route.isActive
+}
+
+// startEagerPrewarm executes an eager prewarm under the concurrency budget. It is
+// best-effort: if the budget is exhausted it skips rather than queues, so
+// speculative work never competes with request-path cold starts.
+func (s *Server) startEagerPrewarm(caller, target string, delay time.Duration, scheduled bool) {
+	select {
+	case s.prewarmSem <- struct{}{}:
+	default:
+		s.logger.Info("skipping eager prewarm - budget exhausted",
+			"caller", caller, "target", target)
+		return
+	}
+
+	go func() {
+		defer func() { <-s.prewarmSem }()
+		s.logger.Info("eager prewarm during cold start",
+			"caller", caller, "target", target, "delay", delay, "scheduled", scheduled)
+		s.executePrewarm(target)
+	}()
 }
 
 // schedulePrewarm schedules a prewarm operation for a target function so that it
@@ -644,8 +676,7 @@ func (s *Server) schedulePrewarm(caller string, target callgraph.PrewarmTarget) 
 	}
 
 	// delay = leadTime - coldStartTime - margin
-	const safetyMargin = 50 * time.Millisecond
-	delay := target.LeadTime - coldStartTime - safetyMargin
+	delay := target.LeadTime - coldStartTime - prewarmSafetyMargin
 
 	if delay <= 0 {
 		// The cold start cannot finish within the observed lead time, so firing
